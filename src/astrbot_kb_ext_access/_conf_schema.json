@@ -1,4 +1,10 @@
 {
+  "avg_embedding_time": {
+    "description": "平均嵌入耗时（秒/每切片），用于预估上传时间",
+    "type": "float",
+    "default": 1.5,
+    "hint": "OpenAI 模型约 0.5s，本地模型约 2-5s。影响 astr_kb_estimate_upload_time 的估算结果。"
+  },
   "kb_access_control": {
     "description": "知识库访问控制配置",
     "type": "object",

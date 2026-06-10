@@ -11,9 +11,10 @@ class KbAccessControl:
     2. whitelist 模式且 kb_id 不在白名单中 → 拒绝
     3. 其他情况 → 允许
 
-    select_knowledgebase 在 WebUI 配置中存储的是知识库显示名而非 kb_id。
-    插件初始化时调用 ``resolve_names()`` 将配置中的名称一次性替换为 ID，
-    后续所有匹配操作均基于 ID 进行，避免重复解析。
+    配置项 whitelist/blacklist 存储的是知识库 ID。
+    插件页面保存时直接写入 ID（而非显示名），
+    所有匹配操作均基于 ID 进行。
+    保留 resolve_names() 方法用于兼容旧配置中的名称。
     """
 
     MODE_WHITELIST = "whitelist"
@@ -23,7 +24,7 @@ class KbAccessControl:
         config = config or {}
         kb_ac = config.get("kb_access_control", {}) if isinstance(config, dict) else {}
         self.mode: str = kb_ac.get("mode", self.MODE_WHITELIST)
-        # 原始配置可能包含 kb_id 或显示名，不做预解析
+        # 配置存储的是 kb_id，保留 raw 用于 resolve_names 兼容
         self._raw_whitelist: set[str] = set(kb_ac.get("whitelist", []) or [])
         self._raw_blacklist: set[str] = set(kb_ac.get("blacklist", []) or [])
         self.whitelist: set[str] = set()
@@ -33,10 +34,11 @@ class KbAccessControl:
             kb_ac.get("auto_whitelist_created", True)
         )
 
-    # ── name→id resolution (call once at init) ────────────────────
+    # ── name→id resolution (backward compatibility) ───────────────
 
     def resolve_names(self, kbs: list) -> None:
-        """将配置中的知识库名称解析为 kb_id。
+        """将旧配置中的知识库名称解析为 kb_id（兼容旧版）。
+        新版配置直接存储 ID，此方法仅用于迁移旧数据。
 
         Args:
             kbs: KnowledgeBase 对象列表（来自 kb_manager.list_kbs()）。
@@ -75,7 +77,7 @@ class KbAccessControl:
                 f"或 '{self.MODE_BLACKLIST}'，当前值: {self.mode!r}"
             )
 
-    # ── access checks (IDs only; resolve_names must be called first) ──
+    # ── access checks (IDs only) ──
 
     def check_kb_access(self, kb_id: str, kbs: list | None = None) -> None:
         """检查是否允许操作指定知识库。

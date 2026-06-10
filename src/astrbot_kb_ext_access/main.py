@@ -19,6 +19,8 @@ from astrbot.api.event import AstrMessageEvent
 from .access_control import KbAccessControl
 from .kb_uploader import KnowledgeBaseUploader
 
+import datetime
+
 
 class AstrBotKnowledgeBaseExtAccess(star.Star):
     """为 AstrBot Agent 提供知识库搜索、文件上传与知识库创建能力。
@@ -32,8 +34,15 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         config: dict | None = None,
     ) -> None:
         self.context = context
+        raw_config = dict(config) if config else {}
         # config is an AstrBotConfig dict-like object from _conf_schema.json
-        self.access_control = KbAccessControl(dict(config) if config else {})
+        self.access_control = KbAccessControl(raw_config)
+        self._avg_embedding_time: float = float(
+            raw_config.get("avg_embedding_time", 1.5)
+        )
+        # 异步上传并发控制 & 共享结果存储
+        self._async_pending: dict[str, dict] = {}
+        self._async_upload_in_progress: str | None = None
 
     async def initialize(self) -> None:
         """初始化插件：校验配置，注册插件页面 API。
@@ -222,11 +231,15 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         sandbox_path: str = "",
         chunk_size: int = 512,
         chunk_overlap: int = 50,
+        timeout: float = 100.0,
+        max_retries: int = 3,
+        wait_completion: bool = True,
     ) -> str:
         """向指定的 AstrBot 知识库上传文件。
 
         Upload file content to a specified knowledge base.
         优先使用 sandbox_path 直接传输二进制文件，其次使用 file_content。
+        上传会等待向量化完成，大文件可能耗时较长。
 
         Args:
             kb_id(string): 目标知识库ID
@@ -236,6 +249,19 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             sandbox_path(string): 沙箱中的文件路径（优先使用，无需 base64 转码）
             chunk_size(number): 分块大小（字符数），默认 512
             chunk_overlap(number): 分块重叠（字符数），默认 50
+            timeout(number): 单次同步尝试的超时秒数，默认 100。
+                如果同步上传超时，说明该文件不适合同步模式。
+                ⚠️ 不要试图用增大 timeout 解决问题——框架有 120s 硬限制，
+                且超过 100s 的文件说明向量化耗时较长，即使 timeout=120 也可能失败。
+                正确做法: 改用 wait_completion=false 异步上传 + future_task 轮询。
+            max_retries(number): 失败重试次数，默认 3。设为 0 不重试。
+            wait_completion(bool): 是否等待向量化完成。默认 True。
+                设为 False 进入异步模式: 文件提交到后台处理后立即返回，
+                不等待向量化。适用于同步上传超时的文件。
+                提交后必须使用 future_task 安排轮询检查，不得主动轮询。
+                ⚠️ 并发限制: 同一时间只允许一个 wait_completion=false 上传。
+                若有其他异步上传进行中，工具会拒绝。请通过 future_task
+                链式回调逐个上传。
         """
         # 权限检查：白名单/黑名单（ID 已在 initialize() 中解析完成）
         try:
@@ -252,8 +278,29 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 f"请先调用 astr_kb_list 确认可用的知识库 ID。"
             )
 
-        # 执行上传
-        uploader = KnowledgeBaseUploader(kb_helper)
+        # 并发控制：同一时间只允许一个异步上传
+        if not wait_completion:
+            if self._async_upload_in_progress is not None:
+                return (
+                    f"❌ 已有异步上传进行中: {self._async_upload_in_progress}\n"
+                    f"请先使用 astr_kb_check_upload 查询该文件的状态。\n"
+                    f"完成后再提交下一个。正确做法: 在 future_task 的 note 中"
+                    f"嵌入下一个文件的上传指令，让回调链自动处理所有文件。\n"
+                    f"不要同时启动多个 wait_completion=false——工具会拒绝。"
+                )
+            self._async_upload_in_progress = file_name
+
+        # 定义异步上传完成回调（释放并发锁）
+        async def _on_async_done(done_file: str) -> None:
+            if self._async_upload_in_progress == done_file:
+                self._async_upload_in_progress = None
+
+        # 执行上传（共享 pending_store 确保跨工具调用可读取结果）
+        uploader = KnowledgeBaseUploader(
+            kb_helper,
+            pending_store=self._async_pending,
+            on_async_complete=_on_async_done,
+        )
 
         if sandbox_path:
             # 通过沙箱 Python 执行读取二进制文件并 base64 编码，避免 LLM 中转
@@ -281,6 +328,9 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 raw_bytes=raw_bytes,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                timeout=timeout,
+                max_retries=max_retries,
+                wait_completion=wait_completion,
             )
         else:
             result = await uploader.upload(
@@ -289,10 +339,366 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 binary=binary,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                timeout=timeout,
+                max_retries=max_retries,
+                wait_completion=wait_completion,
             )
         return result["result"]
 
-    # ── Tool 3: Create knowledge base ─────────────────────────────
+    # ── Tool 3b: Batch upload files ───────────────────────────────
+
+    @llm_tool(name="astr_kb_upload_batch")
+    async def upload_to_knowledge_base_batch(
+        self,
+        event: AstrMessageEvent,
+        files: list,
+    ) -> str:
+        """批量上传多个文件到知识库，逐个上传，阻断等待。
+
+        Batch upload multiple files to a knowledge base.
+        Processes files SEQUENTIALLY with blocking waits — each file must
+        complete vectorization before the next starts.
+        注意: 仅用于所有文件预估耗时均 < 30s 的场景。
+        如果任何一个文件同步超时，该文件及其后的所有文件都会失败。
+        大文件请使用 astr_kb_upload(wait_completion=false) 逐个异步上传。
+
+        Args:
+            files(list): 上传任务列表，每项为 dict:
+                - kb_id(string): 必填
+                - file_name(string): 必填
+                - file_content(string): 可选
+                - binary(bool): 可选
+                - sandbox_path(string): 可选
+                - chunk_size(number): 可选
+                - chunk_overlap(number): 可选
+                - timeout(number): 可选，默认 100
+                - max_retries(number): 可选，默认 3
+        """
+        if not files:
+            return "❌ 批量上传: 文件列表为空。"
+        if len(files) > 20:
+            return "❌ 批量上传: 单次最多上传 20 个文件。"
+
+        results: list[str] = []
+        success_count = 0
+        fail_count = 0
+
+        for i, item in enumerate(files, 1):
+            if not isinstance(item, dict):
+                results.append(f"[{i}] ❌ 无效的条目格式（非 dict）")
+                fail_count += 1
+                continue
+
+            kb_id = item.get("kb_id", "")
+            file_name = item.get("file_name", "")
+            if not kb_id or not file_name:
+                results.append(f"[{i}] ❌ 缺少 kb_id 或 file_name")
+                fail_count += 1
+                continue
+
+            # 权限检查
+            try:
+                self.access_control.check_kb_access(kb_id)
+            except PermissionError as e:
+                results.append(f"[{i}] ❌ {file_name}: 权限不足 — {e}")
+                fail_count += 1
+                continue
+
+            # 获取知识库
+            kb_helper = await self.context.kb_manager.get_kb(kb_id)
+            if not kb_helper:
+                results.append(f"[{i}] ❌ {file_name}: 知识库 {kb_id} 不存在")
+                fail_count += 1
+                continue
+
+            uploader = KnowledgeBaseUploader(kb_helper)
+            timeout = float(item.get("timeout", 100))
+            max_retries = int(item.get("max_retries", 3))
+            sandbox_path = item.get("sandbox_path", "") or ""
+            file_content = item.get("file_content", "") or ""
+            binary = bool(item.get("binary", False))
+            chunk_size = int(item.get("chunk_size", 512))
+            chunk_overlap = int(item.get("chunk_overlap", 50))
+
+            try:
+                if sandbox_path:
+                    from astrbot.core.computer.computer_client import get_booter
+                    import base64 as b64
+                    sb = await get_booter(self.context, event.unified_msg_origin)
+                    py_code = (
+                        "import base64\n"
+                        f"with open({sandbox_path!r}, 'rb') as f:\n"
+                        "    print(base64.b64encode(f.read()).decode())\n"
+                    )
+                    py_result = await sb.python.exec(py_code, timeout=60)
+                    if not py_result.get("success", True):
+                        results.append(f"[{i}] ❌ {file_name}: 沙箱读取失败")
+                        fail_count += 1
+                        continue
+                    raw = b64.b64decode((py_result.get("output", "") or "").strip())
+                    r = await uploader.upload_bytes(
+                        file_name=file_name, raw_bytes=raw,
+                        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                        timeout=timeout, max_retries=max_retries,
+                        wait_completion=True,
+                    )
+                else:
+                    r = await uploader.upload(
+                        file_name=file_name, file_content=file_content, binary=binary,
+                        chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                        timeout=timeout, max_retries=max_retries,
+                        wait_completion=True,
+                    )
+            except Exception as e:
+                results.append(f"[{i}] ❌ {file_name}: {e!s}")
+                fail_count += 1
+                continue
+
+            if r.get("success"):
+                success_count += 1
+                # 只取结果的第一行（✅ 上传成功）和文件名/文档ID行
+                lines = r["result"].split("\n")
+                summary = lines[0]
+                for line in lines[1:]:
+                    if "文件名" in line or "文档ID" in line or "切片数" in line:
+                        summary += f"\n  {line.strip()}"
+                results.append(f"[{i}] {summary}")
+            else:
+                fail_count += 1
+                results.append(f"[{i}] {r['result']}")
+
+        summary = (
+            f"📊 批量上传完成: {success_count} 成功, {fail_count} 失败"
+            f"（共 {len(files)} 个）"
+        )
+        return summary + "\n\n" + "\n\n".join(results)
+
+    # ── Tool 3c: Check pending upload status ──────────────────────
+
+    @llm_tool(name="astr_kb_check_upload")
+    async def check_upload_status(
+        self,
+        event: AstrMessageEvent,
+        kb_id: str,
+        file_name: str,
+    ) -> str:
+        """查询后台上传任务的完成状态（与 wait_completion=False 配合使用）。
+
+        Check if a background upload (started with wait_completion=False)
+        has finished vectorization.
+
+        Args:
+            kb_id(string): 知识库 ID
+            file_name(string): 文件名
+        """
+        # 先查共享 pending_store（跨工具调用持久化）
+        cached = self._async_pending.pop(file_name, None)
+        if cached:
+            return cached["result"]
+
+        # 没有缓存 → 看是否有异步上传正在运行
+        if self._async_upload_in_progress == file_name:
+            return (
+                f"⏳ 文件 {file_name} 正在后台处理中，请稍后再查。\n"
+                f"注意: 同一时间只能有一个异步上传，请等待当前文件完成。"
+            )
+        if self._async_upload_in_progress is not None:
+            return (
+                f"⏳ 当前有另一个异步上传正在进行: {self._async_upload_in_progress}\n"
+                f"文件 {file_name} 尚未开始上传或已被取消。请等待当前上传完成。"
+            )
+
+        # 没有任何异步任务 → 查知识库文档列表确认是否已完成
+        kb_helper = await self.context.kb_manager.get_kb(kb_id)
+        if not kb_helper:
+            return f"❌ 知识库 {kb_id} 不存在。"
+
+        try:
+            docs = await kb_helper.list_documents()
+        except Exception as e:
+            return f"❌ 查询文档列表失败: {e!s}"
+
+        target = None
+        for doc in docs or []:
+            if doc.file_name == file_name or doc.doc_id == file_name:
+                target = doc
+                break
+
+        if not target:
+            return (
+                f"⏳ 文件 {file_name} 不在知识库中，可能尚未开始上传。\n"
+                f"请使用 astr_kb_upload 重新提交。"
+            )
+
+        chunk_count = getattr(target, "chunk_count", 0)
+        if chunk_count and chunk_count > 0:
+            return (
+                f"✅ 文件 {file_name} 已完成向量化。\n"
+                f"- 文档ID: {target.doc_id}\n"
+                f"- 切片数: {chunk_count}"
+            )
+
+        return (
+            f"⏳ 文件 {file_name} 向量化中 (doc_id={target.doc_id})，切片数: {chunk_count}。\n"
+            f"请稍后重试 astr_kb_check_upload。"
+        )
+
+    # ── Tool 3d: Schedule FutureTask check (server-side time) ────
+
+    @llm_tool(name="astr_kb_schedule_check")
+    async def schedule_upload_check(
+        self,
+        event: AstrMessageEvent,
+        file_name: str,
+        delay_seconds: int,
+        note_text: str,
+    ) -> str:
+        """安排一个 FutureTask 在指定秒数后检查上传状态。
+        使用服务器系统时钟计算 run_at，避免 agent 时间不准导致偏差。
+
+        Schedule a one-time FutureTask to check upload status after a delay.
+        Uses the server's system clock — no more wrong timestamps.
+
+        Args:
+            file_name(string): 文件名，用于任务标签
+            delay_seconds(number): 从当前时刻起多少秒后执行
+            note_text(string): 被唤醒时要执行的指令。包含工具调用和判断逻辑。
+        """
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            return (
+                "❌ 无法安排检查任务: cron_manager 不可用。\n"
+                "请确认已启用 AstrBot 的主动型能力。"
+            )
+
+        # 用服务器系统时钟计算绝对时间
+        now = datetime.datetime.now(datetime.timezone.utc).astimezone()
+        run_at = now + datetime.timedelta(seconds=delay_seconds)
+        run_at_iso = run_at.isoformat()
+
+        # 构造 payload
+        payload = {
+            "session": event.unified_msg_origin,
+            "sender_id": event.get_sender_id(),
+            "note": note_text,
+            "origin": "tool",
+        }
+
+        try:
+            from astrbot.core.cron.manager import CronJobSchedulingError
+            job = await cron_mgr.add_active_job(
+                name=f"check_upload_{file_name}",
+                cron_expression=None,
+                payload=payload,
+                description=note_text,
+                run_once=True,
+                run_at=run_at,
+            )
+        except CronJobSchedulingError:
+            return "❌ 安排检查失败: cron 调度器配置无效。"
+        except Exception as e:
+            return f"❌ 安排检查失败: {e!s}"
+
+        return (
+            f"✅ 已安排检查任务\n"
+            f"- 文件名: {file_name}\n"
+            f"- 任务ID: {job.job_id}\n"
+            f"- 计划执行时间: {run_at_iso}\n"
+            f"- 延迟: {self._format_duration(delay_seconds)}\n"
+            f"⏰ AstrBot 将在计划时间自动唤醒并执行 note 中的指令。"
+        )
+
+    # ── Tool 3e: Estimate upload time ─────────────────────────────
+
+    @llm_tool(name="astr_kb_estimate_upload_time")
+    async def estimate_upload_time(
+        self,
+        event: AstrMessageEvent,
+        file_size_bytes: int,
+        file_name: str,
+        chunk_size: int = 512,
+        chunk_overlap: int = 50,
+    ) -> str:
+        """根据文件大小和类型预估向量化耗时，用于决定上传策略（同步/异步/批量）。
+
+        Estimate vectorization time from file size and type.
+        Use this before uploading to determine the right strategy.
+        注意: XLSX/DOCX/EPUB 等压缩格式的估算可能偏小（解压后文本膨胀量不确定）。
+        如果按估算选择了同步但实际超时，说明估算不准——请直接改用异步模式。
+
+        Args:
+            file_size_bytes(number): 文件大小（字节），可用 ls -l 或 stat 获得
+            file_name(string): 文件名（含扩展名），用于推断文件类型
+            chunk_size(number): 分块大小，默认 512
+            chunk_overlap(number): 分块重叠，默认 50
+        """
+        # 文件类型 → 文本内容占比（经验值）
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        text_ratio_map = {
+            "txt": 1.0, "md": 1.0, "markdown": 1.0, "mkd": 1.0, "mdx": 1.0,
+            "rst": 0.9, "adoc": 0.9,
+            "pdf": 0.4,
+            "docx": 0.25, "epub": 0.25,
+            "xls": 0.1, "xlsx": 0.1,
+        }
+        text_ratio = text_ratio_map.get(ext, 0.3)
+
+        # 计算
+        estimated_chars = file_size_bytes * text_ratio
+        effective_chunk_size = max(chunk_size - chunk_overlap, 1)
+        estimated_chunks = max(1, int(estimated_chars / effective_chunk_size))
+        estimated_seconds = estimated_chunks * self._avg_embedding_time
+
+        # 推荐轮询间隔：min(10min, 预估耗时/10)
+        polling_interval = max(30, min(600, int(estimated_seconds / 10)))
+        polling_str = self._format_duration(polling_interval)
+
+        # 判断策略
+        if estimated_chunks == 0:
+            strategy = "文件为空，无需上传"
+        elif estimated_seconds <= 30:
+            strategy = "✅ 极快（< 30s），可直接 astr_kb_upload（同步）或 astr_kb_upload_batch"
+        elif estimated_seconds <= 100:
+            strategy = "✅ 较快（< 框架 120s 限制），可使用 astr_kb_upload（同步）"
+        else:
+            strategy = "⚠️ 可能超时，必须使用 astr_kb_upload(wait_completion=false) + 轮询"
+
+        return (
+            f"📊 上传耗时估算\n"
+            f"- 文件名: {file_name}\n"
+            f"- 文件大小: {self._format_bytes(file_size_bytes)}\n"
+            f"- 文本占比: {text_ratio}（{ext} 类型）\n"
+            f"- 预估字符数: {estimated_chars:,}\n"
+            f"- 切片数: ~{estimated_chunks}\n"
+            f"- 平均嵌入耗时: {self._avg_embedding_time}s/切片\n"
+            f"- 预估总耗时: ~{self._format_duration(estimated_seconds)}\n"
+            f"- 建议策略: {strategy}\n"
+            f"- 推荐轮询间隔: {polling_str}（用于 future_task 的 run_at 间隔）"
+        )
+
+    @staticmethod
+    def _format_bytes(n: int) -> str:
+        if n < 1024:
+            return f"{n} B"
+        elif n < 1024 * 1024:
+            return f"{n / 1024:.1f} KB"
+        elif n < 1024 * 1024 * 1024:
+            return f"{n / 1024 / 1024:.1f} MB"
+        return f"{n / 1024 / 1024 / 1024:.1f} GB"
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            m, s = divmod(int(seconds), 60)
+            return f"{m}m{s}s"
+        else:
+            h, r = divmod(int(seconds), 3600)
+            m, _ = divmod(r, 60)
+            return f"{h}h{m}m"
+
+    # ── Tool 4: Create knowledge base ─────────────────────────────
 
     @llm_tool(name="astr_kb_create")
     async def create_knowledge_base(

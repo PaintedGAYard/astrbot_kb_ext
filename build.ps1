@@ -18,9 +18,16 @@ $ErrorActionPreference = "Stop"
 
 # ── Configuration ────────────────────────────────────────────────
 $PluginName   = "astrbot_kb_ext_access"
-$Version      = "0.4.0"
 $SourceDir    = Join-Path $PSScriptRoot "src" $PluginName
 $OutDir       = Join-Path $PSScriptRoot "out"
+
+# 自动从 metadata.yaml 读取版本号
+$Version      = if (Test-Path (Join-Path $SourceDir "metadata.yaml")) {
+    $yaml = Get-Content (Join-Path $SourceDir "metadata.yaml") -Raw
+    if ($yaml -match 'version:\s*([\d.]+)') { $Matches[1] } else { "0.0.0" }
+} else { "0.0.0" }
+
+# ── Validate source directory ────────────────────────────────────
 $OutputZip    = Join-Path $OutDir "${PluginName}_${Version}.zip"
 
 # ── Validate source directory ────────────────────────────────────
