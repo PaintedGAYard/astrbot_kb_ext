@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 
 # ── Configuration ────────────────────────────────────────────────
 $PluginName   = "astrbot_kb_ext_access"
-$Version      = "0.2.2"
+$Version      = "0.4.0"
 $SourceDir    = Join-Path $PSScriptRoot "src" $PluginName
 $OutDir       = Join-Path $PSScriptRoot "out"
 $OutputZip    = Join-Path $OutDir "${PluginName}_${Version}.zip"

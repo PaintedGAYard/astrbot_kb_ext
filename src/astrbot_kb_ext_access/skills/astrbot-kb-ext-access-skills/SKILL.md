@@ -1,58 +1,119 @@
 ---
 name: astrbot-kb-ext-access-skills
-description: 知识库搜索、文件上传与创建 / Knowledge base listing, upload & creation
+description: 知识库搜索、上传、创建与删除 / Knowledge base listing, upload, creation & deletion
 ---
 
-# 知识库管理工具 / Knowledge Base Management Tools
+# Knowledge Base Management Tools
 
-你可以通过以下工具操作 AstrBot 知识库。请直接调用这些工具，不要尝试使用 HTTP API 或数据库。
-You have access to AstrBot knowledge bases through the following tools.
-Always call these tools directly — do NOT try to use HTTP API or database directly.
+Use these function tools to interact with AstrBot knowledge bases.
+Do NOT use HTTP API or database directly.
 
-## 可用工具 / Available Tools
+**IMPORTANT**: Before ANY deletion, ask the user for confirmation unless they explicitly say "skip confirmation" / "just delete it".
 
-### `astr_kb_list`
-列出所有可用的知识库。上传文件之前，先调用此工具获取目标 `kb_id`。
-List all available knowledge bases. Use this first to find the target `kb_id`.
+---
 
-**使用时机 / When to use**: 当用户询问知识库时，或在上传文件之前。
-When the user asks about knowledge bases, or before uploading files.
+## Tool Reference
 
-### `astr_kb_upload`
-向知识库上传文件。
-Upload a file to a knowledge base.
+### `astr_kb_list` — List KBs
+When: Before any KB operation to find kb_id.
+Output is already filtered by whitelist/blacklist.
+Parameters: `query` (optional, name keyword).
 
-**使用时机 / When to use**: 当用户要求保存/存储/上传内容到知识库时。
-When the user asks to save/store/upload content to a knowledge base.
+### `astr_kb_upload` — Upload file
+When: User asks to save/store content to a KB.
+Steps: (1) `astr_kb_list` to get kb_id (2) ask user if unspecified (3) upload.
 
-**步骤 / Steps**:
-1. 先调用 `astr_kb_list` 获取可用知识库列表和 ID。
-   First call `astr_kb_list` to get available KBs and their IDs.
-2. 如果用户未指定，询问用户要上传到哪个知识库。
-   Ask the user which KB to upload to (if not specified).
-3. 调用 `astr_kb_upload`，传入文件内容和目标 `kb_id`。
-   Call `astr_kb_upload` with the file content and target `kb_id`.
+**Upload methods** (choose one):
 
-**参数 / Parameters**:
-- `kb_id`: 必填。从 `astr_kb_list` 获取。Required. Get this from `astr_kb_list`.
-- `file_name`: 必填。包含扩展名（如 "report.md"）。Required. Include the extension.
-- `file_content`: 必填。完整的文本内容。Required. The full text content to upload.
-- `chunk_size`: 可选，默认 512。Optional. Default 512.
-- `chunk_overlap`: 可选，默认 50。Optional. Default 50.
+**A. `sandbox_path` (recommended for binary files)** — pass the file path in the sandbox.
+The tool downloads the file directly from the sandbox — no base64 needed.
+```python
+# Agent reads binary file in sandbox, passes its path:
+astr_kb_upload(kb_id="xxx", sandbox_path="/workspace/doc.pdf", file_name="doc.pdf")
+```
 
-### `astr_kb_create`
-创建新的知识库。
-Create a new knowledge base.
+**B. `file_content`** — for text content or small files.
+- Text: `file_content="plain text"`
+- Binary with base64: `file_content="base64...", binary=true`
 
-**使用时机 / When to use**: 当用户要求创建一个新的知识库来组织文档时。
-When the user asks to create a new knowledge base.
+Parameters:
+- `kb_id` (required): from astr_kb_list
+- `file_name` (required): include extension — determines how AstrBot parses it
+- `file_content` (optional): text or base64 data; used only when sandbox_path is empty
+- `binary` (optional, default false): set true if file_content is base64-encoded
+- `sandbox_path` (optional): path in sandbox — tool downloads directly, no encoding needed
+- `chunk_size` (optional, default 512)
+- `chunk_overlap` (optional, default 50)
 
-**参数 / Parameters**:
-- `kb_name`: 必填。简短描述性的名称。Required. A short, descriptive name.
-- `description`: 可选。描述知识库用途。Optional. Describe what this KB is for.
-- `chunk_size`: 可选，默认 512。Optional. Default 512.
+Natively supported formats (exhaustive — files in other formats will be rejected):
 
-## 使用指南 / Guidelines
-- 始终先调用 `astr_kb_list` 展示可用选项 / Always list KBs first
-- 使用描述性的文件名 / Use descriptive file names
-- 清晰报告结果：成功/失败、文档ID、切片数 / Report results clearly
+| Category | Extensions |
+|----------|-----------|
+| Plain text | `.txt` |
+| Markdown | `.md` `.markdown` `.mkd` `.mdx` |
+| Structured text | `.rst` `.adoc` |
+| PDF | `.pdf` |
+| eBook | `.epub` |
+| Word | `.docx` |
+| Excel | `.xls` `.xlsx` |
+
+> ⚠️ Only the formats listed above are accepted. For any other format (e.g. `.doc`, `.ppt`), extract text content first and upload as `.txt`.
+
+### `astr_kb_create` — Create KB
+When: User asks to create a new knowledge base.
+Parameters:
+- `kb_name` (required): short descriptive name
+- `description` (optional): what this KB is for
+- `embedding_provider` (optional): provider ID or keyword; leave blank for auto-select
+- `rerank_provider` (optional): provider ID or keyword; leave blank to skip
+- `chunk_size` (optional, default 512)
+- `chunk_overlap` (optional, default 50)
+
+Note: created KB is auto-added to whitelist. Use `astr_kb_search_ext` afterwards.
+
+### `astr_kb_delete` — Delete KB (IRREVERSIBLE)
+When: User asks to delete an entire KB.
+Parameters:
+- `kb_id` (required)
+- `confirm` (optional, default false): set true to execute
+
+### `astr_kb_delete_document` — Delete document (IRREVERSIBLE)
+When: User asks to delete a specific file/document from a KB.
+Parameters:
+- `kb_id` (required)
+- `doc_id` (optional, xor with file_name)
+- `file_name` (optional, xor with doc_id): keyword match
+- `confirm` (optional, default false): set true to execute
+
+### `astr_kb_search_ext` — Search (access-controlled)
+When: See search strategy below.
+Parameters: `query` (required).
+
+---
+
+## Search Strategy — Which tool to use?
+
+Two search tools exist. Both search the same vector DB but differ in which KBs they cover:
+
+| Tool | Scope | Access control |
+|------|-------|---------------|
+| Built-in `astr_kb_search` | Dashboard-global KB config | None (fixed by admin) |
+| Plugin `astr_kb_search_ext` | Plugin whitelist | Yes — only whitelisted KBs |
+
+### Decision flow
+
+```
+User mentions a specific KB?
+  ├── YES — is it in the plugin whitelist?
+  │     ├── YES → astr_kb_search_ext
+  │     └── NO  → built-in astr_kb_search
+  ├── YES — just created by this plugin → astr_kb_search_ext
+  └── NO  (vague request like "search the KB")
+        → built-in astr_kb_search FIRST
+        → if no results, suggest astr_kb_search_ext
+```
+
+## General rules
+- Always `astr_kb_list` first to get kb_id before file operations
+- Report results with key info: doc_id, chunk count, success/failure
+- Delete ops MUST ask user confirmation first

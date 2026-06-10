@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import tempfile
 import time
@@ -29,8 +30,9 @@ class KnowledgeBaseUploader:
 
         Create a callback that records processing phase markers.
         """
+        import asyncio
 
-        def _callback(stage: str, current: int, total: int) -> None:
+        async def _callback(stage: str, current: int, total: int) -> None:
             self._phases.append({
                 "stage": stage,
                 "current": current,
@@ -43,6 +45,7 @@ class KnowledgeBaseUploader:
         self,
         file_name: str,
         file_content: str,
+        binary: bool = False,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> dict[str, Any]:
@@ -52,7 +55,8 @@ class KnowledgeBaseUploader:
 
         Args:
             file_name: 文件名（含扩展名）。
-            file_content: 文件文本内容。
+            file_content: 文件文本内容；若 binary=True 则为 base64 编码的原始文件内容。
+            binary: 是否将 file_content 视为 base64 编码的二进制数据。
             chunk_size: 分块大小（字符数）。
             chunk_overlap: 分块重叠（字符数）。
 
@@ -69,26 +73,61 @@ class KnowledgeBaseUploader:
             else "txt"
         )
 
-        # 写入临时文件
+        # 将输入转换为原始字节
+        if binary:
+            raw_bytes = base64.b64decode(file_content)
+        else:
+            raw_bytes = file_content.encode("utf-8")
+
+        return await self._do_upload(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, start_time)
+
+    async def upload_bytes(
+        self,
+        file_name: str,
+        raw_bytes: bytes,
+        chunk_size: int = 512,
+        chunk_overlap: int = 50,
+    ) -> dict[str, Any]:
+        """直接上传原始字节数据（由 sandbox_path 模式调用）。
+
+        Upload raw bytes directly (called by sandbox_path mode).
+
+        Args:
+            file_name: 文件名（含扩展名）。
+            raw_bytes: 文件的原始二进制内容。
+            chunk_size: 分块大小。
+            chunk_overlap: 分块重叠。
+
+        Returns:
+            dict: 包含 result (str) 和 success (bool)。
+        """
+        self._phases.clear()
+        start_time = time.monotonic()
+        file_type = (
+            file_name.rsplit(".", 1)[-1].lower()
+            if "." in file_name
+            else "txt"
+        )
+        return await self._do_upload(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, start_time)
+
+    async def _do_upload(
+        self, file_name: str, file_type: str, raw_bytes: bytes,
+        chunk_size: int, chunk_overlap: int, start_time: float,
+    ) -> dict[str, Any]:
+        """上传的核心逻辑（写入临时文件 → 调用 kb_helper）。"""
         tmp = tempfile.NamedTemporaryFile(
             suffix=f".{file_type}",
             delete=False,
         )
         try:
-            tmp.write(file_content.encode("utf-8"))
+            tmp.write(raw_bytes)
             tmp.close()
-
-            # 异步读取文件内容
-            import aiofiles
-
-            async with aiofiles.open(tmp.name, "rb") as f:
-                raw_content = await f.read()
 
             # 调用上传 API，传入进度回调
             progress_cb = self._make_progress_callback()
             doc = await self._kb_helper.upload_document(
                 file_name=file_name,
-                file_content=raw_content,
+                file_content=raw_bytes,
                 file_type=file_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,

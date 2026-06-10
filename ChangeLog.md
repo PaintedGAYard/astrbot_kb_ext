@@ -1,13 +1,36 @@
 # AstrBot KB External Access — ChangeLog
 
-## v0.2.2 (2026-06-10)
+## v0.4.0 (2026-06-10)
+
+### 新增
+
+- `astr_kb_search_ext` — 受插件白名单控制的搜索工具（#23）
+- `astr_kb_create` 新增 `embedding_provider` / `rerank_provider` 参数，支持模糊匹配（#26）
+- `astr_kb_upload` 新增 `binary` 参数，支持 base64 编码的二进制文件上传（#29）
+- `astr_kb_upload` 新增 `sandbox_path` 参数，通过沙箱 Python 执行直接读取二进制文件（#30）
+
+### 修复
+
+- 修复上传进度回调非异步导致的 TypeError（#22）
+- 修复配置文件 BOM 读取错误（#19）
+- 修复 `_api_save_config` 缺少 return 导致的 500 错误（#25）
+- 修复创建知识库后自动白名单未持久化的问题（#27）
 
 ### 变更
 
-- 新增插件页面（Pages）实现知识库选择器，保存纯 kb_id
-- 新增三个 Web API 端点支持插件页面
-- 移除 `_special: select_knowledgebase` 依赖
-- 清理调试代码和文档字符串
+- 重写 SKILL.md 为面向 Agent 的格式（#24）
+- 移除 session config 补丁，不再尝试兼容内置搜索（#28）
+- 上传文件格式列表改为穷举式，明确标记不支持 doc/ppt 等格式
+
+---
+
+
+### 新增
+
+- `astr_kb_delete` — Agent 可删除知识库，删除后自动清理白名单孤儿条目
+- `astr_kb_delete_document` — Agent 可删除知识库中的指定文档
+- 删除操作前自动请求用户确认（除非传入 confirm=true）
+- 配置持久化辅助方法 `_persist_config()`
 
 ## v0.2.1 (2026-06-10)
 
