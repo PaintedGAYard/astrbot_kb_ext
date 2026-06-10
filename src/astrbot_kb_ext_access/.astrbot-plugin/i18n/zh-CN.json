@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "name": "AstrBot 知识库外部访问",
+    "desc": "为 AstrBot Agent 提供知识库列表查询、文件上传与知识库创建能力，支持白名单/黑名单访问控制。"
+  },
+  "config": {
+    "kb_access_control.mode.description": "访问控制模式",
+    "kb_access_control.mode.hint": "whitelist: 仅允许白名单中的知识库; blacklist: 禁止黑名单中的知识库",
+    "kb_access_control.whitelist.description": "白名单知识库 ID 列表",
+    "kb_access_control.whitelist.hint": "仅允许 Agent 访问这些知识库。在白名单模式下，空列表表示不允许任何知识库。",
+    "kb_access_control.blacklist.description": "黑名单知识库 ID 列表",
+    "kb_access_control.blacklist.hint": "禁止 Agent 访问这些知识库。黑名单优先级高于白名单。",
+    "kb_access_control.auto_whitelist_created.description": "新建知识库自动加入白名单",
+    "kb_access_control.auto_whitelist_created.hint": "通过本插件创建的知识库是否自动添加到白名单中。仅 whitelist 模式下有效。"
+  }
+}

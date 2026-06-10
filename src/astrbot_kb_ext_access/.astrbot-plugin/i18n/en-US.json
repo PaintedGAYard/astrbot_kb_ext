@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "name": "AstrBot KB External Access",
+    "desc": "Provides Agent-facing tools for listing, uploading to, and creating knowledge bases with whitelist/blacklist access control."
+  },
+  "config": {
+    "kb_access_control.mode.description": "Access control mode",
+    "kb_access_control.mode.hint": "whitelist: only allow KBs in the whitelist; blacklist: block KBs in the blacklist",
+    "kb_access_control.whitelist.description": "Whitelist of KB IDs",
+    "kb_access_control.whitelist.hint": "Agent is only allowed to access these KBs. In whitelist mode, an empty list means no KBs are accessible.",
+    "kb_access_control.blacklist.description": "Blacklist of KB IDs",
+    "kb_access_control.blacklist.hint": "Agent is blocked from accessing these KBs. Blacklist takes priority over whitelist.",
+    "kb_access_control.auto_whitelist_created.description": "Auto-whitelist created KBs",
+    "kb_access_control.auto_whitelist_created.hint": "Whether newly created KBs are automatically added to the whitelist. Only effective in whitelist mode."
+  }
+}

@@ -1,81 +1,53 @@
-# AstrBot KB Tools Plugin v2.0
+# AstrBot KB External Access
 
-Agent-only, minimal output, token-efficient JSON.
+AstrBot Star plugin providing Agent-facing tools for knowledge base listing, file upload, and knowledge base creation, with configurable whitelist/blacklist access control.
 
-## Tools
+## Features
 
-| Tool | API | 说明 |
-|------|-----|------|
-| `get_astrbot_kb_list` | `GET /api/kb/list` | 列出知识库 |
-| `add_astrbot_kb_document` | `POST /api/kb/document/upload` | 上传文档 |
+- **`astr_kb_list`** — List available knowledge bases (with access control filtering)
+- **`astr_kb_upload`** — Upload file content to a knowledge base with configurable chunk parameters
+- **`astr_kb_create`** — Create a new knowledge base with auto-selected embedding provider
+- **Access Control** — Whitelist/blacklist mechanism via plugin configuration
 
-## JSON Output Schemas (token-efficient)
+## Installation
 
-### `get_astrbot_kb_list`
+1. Build: `.\build.ps1` → produces `.\out\astrbot_kb_ext_access_<version>.zip`
+2. In AstrBot WebUI → Plugin Management → Install Plugin → Upload the `.zip` file
 
-```json
-{"ok": true, "kbs": [{"id":"uuid", "name":"Lib", "docs":5, "chunks":30, "desc":"..."}]}
-// or
-{"ok": false, "err": "error message"}
+## Configuration
+
+Configure via AstrBot WebUI → Plugin Settings → `astrbot_kb_ext_access`:
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `mode` | string | `whitelist` | `whitelist` or `blacklist` |
+| `whitelist` | list | `[]` | Allowed KB IDs |
+| `blacklist` | list | `[]` | Blocked KB IDs |
+| `auto_whitelist_created` | bool | `true` | Auto-add created KBs to whitelist |
+
+## Build
+
+```powershell
+.\build.ps1
 ```
 
-| key | type | meaning |
-|-----|------|---------|
-| `ok` | bool | success |
-| `kbs[].id` | str | knowledge base id |
-| `kbs[].name` | str | name |
-| `kbs[].docs` | int | document count |
-| `kbs[].chunks` | int | chunk count |
-| `kbs[].desc` | str | description (max 200 chars) |
+Output: `.\out\astrbot_kb_ext_access_<version>.zip`
 
-### `add_astrbot_kb_document`
-
-```json
-{"ok": true, "n_ok": 3, "n_fail": 0,
- "ok_files": [{"f":"a.txt", "did":"doc-id", "n":12}],
- "fail_files": []}
-// partial fail:
-{"ok": false, "n_ok": 2, "n_fail": 1,
- "ok_files": [...],
- "fail_files": [{"f":"b.docx", "err":"timeout"}],
- "invalid": ["bad/*.xxx"]}
-```
-
-| key | type | meaning |
-|-----|------|---------|
-| `ok` | bool | all succeeded |
-| `n_ok` | int | succeeded count |
-| `n_fail` | int | failed count |
-| `ok_files[].f` | str | filename |
-| `ok_files[].did` | str | doc_id in KB |
-| `ok_files[].n` | int | chunk count |
-| `fail_files[].f` | str | filename |
-| `fail_files[].err` | str | error reason |
-| `invalid` | [str] | paths not found |
-
-## Parameters
-
-### get_astrbot_kb_list
-- `base_url` *(required)*
-- `auth_token` (or env `ASTRBOT_AUTH_TOKEN`)
-
-### add_astrbot_kb_document
-- `paths` *(required)* — file paths, supports glob
-- `base_url` *(required)*
-- `kb_id` *(required)*
-- `auth_token` (or env)
-- `chunk` (int, default 512)
-- `overlap` (int, default 50)
-- `batch` (int, default 32)
-- `retries` (int, default 3)
-- `parallel` (int, default 3)
-- `timeout` (float seconds, default 600, 0=∞)
-
-## 结构
+## Project Structure
 
 ```
-astrbot_kb_tools/   (320 lines Python)
-├── __init__.py      — 包入口
-├── main.py          — tool 定义+实现 (150 lines)
-└── kb_client.py     — HTTP client (152 lines)
+astrbot_kb_tools/
+├── build.ps1                          # Build script
+├── src/astrbot_kb_ext_access/         # Plugin source
+│   ├── main.py                        # Star class + 3 @llm_tool
+│   ├── access_control.py              # Whitelist/blacklist
+│   ├── kb_uploader.py                 # Upload logic
+│   ├── metadata.yaml                  # Plugin metadata
+│   ├── _conf_schema.json             # Config schema
+│   └── skills/                        # Agent SKILL.md
+├── out/                               # Build output
+│   └── astrbot_kb_ext_access_*.zip
+├── design/                            # Design documents
+├── ChangeLog.md
+└── README.md
 ```
