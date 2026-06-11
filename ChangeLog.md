@@ -22,7 +22,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 -->
 
-# AstrBot KB External Access — ChangeLog
+# AstrBot Knowledge Base Extended Access — ChangeLog
+
+## v0.6.2 (2026-06-11)
+
+### 变更
+
+- 更新README
 
 ## v0.6.1 (2026-06-11)
 

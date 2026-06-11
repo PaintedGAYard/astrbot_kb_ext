@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""AstrBot Knowledge Base External Access Plugin.
+"""AstrBot Knowledge Base Extended Access Plugin.
 
 Provides Agent-facing tools for listing, uploading to, and creating
 knowledge bases with configurable whitelist/blacklist access control.

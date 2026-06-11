@@ -20,7 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""AstrBot KB External Access Plugin — main entry point.
+"""AstrBot Knowledge Base Extended Access Plugin — main entry point.
 
 Provides Agent-facing LLM tools:
   - astr_kb_list              : List available knowledge bases

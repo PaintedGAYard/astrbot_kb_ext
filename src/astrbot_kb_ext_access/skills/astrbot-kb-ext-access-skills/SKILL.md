@@ -27,7 +27,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 -->
 
-# AstrBot KB External Access — Tool Index
+# AstrBot Knowledge Base Extended Access — Tool Index
 
 This plugin provides tools for knowledge base management with access control.
 

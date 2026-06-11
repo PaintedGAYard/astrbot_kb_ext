@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "name": "AstrBot KB External Access",
+    "name": "AstrBot Knowledge Base Extended Access",
     "desc": "Provides Agent-facing tools for listing, uploading to, and creating knowledge bases with whitelist/blacklist access control."
   },
   "config": {
