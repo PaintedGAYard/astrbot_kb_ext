@@ -40,7 +40,7 @@ $ErrorActionPreference = "Stop"
 
 # ── Configuration ────────────────────────────────────────────────
 $PluginName   = "astrbot_kb_ext_access"
-$SourceDir    = Join-Path $PSScriptRoot "src" $PluginName
+$SourceDir    = Join-Path $PSScriptRoot "src"
 $OutDir       = Join-Path $PSScriptRoot "out"
 
 # 自动从 metadata.yaml 读取版本号
@@ -71,7 +71,7 @@ if (Test-Path $OutputZip) {
 }
 
 # ── Collect all files and folders (maintains subdirectory structure) ──
-$items = Get-ChildItem -Path $SourceDir
+$items = Get-ChildItem -Path $SourceDir -Exclude "__pycache__"
 
 # Also include README.md from project root
 $readmePath = Join-Path $PSScriptRoot "README.md"
