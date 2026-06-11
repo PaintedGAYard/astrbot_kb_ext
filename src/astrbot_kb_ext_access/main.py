@@ -251,8 +251,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             chunk_overlap(number): 分块重叠（字符数），默认 50
             timeout(number): 单次同步尝试的超时秒数，默认 100。
                 如果同步上传超时，说明该文件不适合同步模式。
-                ⚠️ 不要试图用增大 timeout 解决问题——框架有 120s 硬限制，
-                且超过 100s 的文件说明向量化耗时较长，即使 timeout=120 也可能失败。
+                ⚠️ 不要增大 timeout——超时说明文件太大，即使加到 120s 也可能失败。
                 正确做法: 改用 wait_completion=false 异步上传 + future_task 轮询。
             max_retries(number): 失败重试次数，默认 3。设为 0 不重试。
             wait_completion(bool): 是否等待向量化完成。默认 True。
@@ -550,19 +549,21 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         self,
         event: AstrMessageEvent,
         file_name: str,
-        delay_seconds: int,
+        interval_seconds: int,
         note_text: str,
     ) -> str:
-        """安排一个 FutureTask 在指定秒数后检查上传状态。
-        使用服务器系统时钟计算 run_at，避免 agent 时间不准导致偏差。
+        """安排一个按固定间隔重复激活的 FutureTask 来检查上传状态。
+        使用服务器系统时钟和 cron 表达式，避免 agent 时间不准。
 
-        Schedule a one-time FutureTask to check upload status after a delay.
-        Uses the server's system clock — no more wrong timestamps.
+        Schedule a RECURRING FutureTask that fires every N seconds to
+        check upload status. When the upload completes, the agent should
+        delete this task (see note_text for the deletion instruction).
 
         Args:
             file_name(string): 文件名，用于任务标签
-            delay_seconds(number): 从当前时刻起多少秒后执行
-            note_text(string): 被唤醒时要执行的指令。包含工具调用和判断逻辑。
+            interval_seconds(number): 轮询间隔（秒），最小 180（3分钟）
+            note_text(string): 被唤醒时要执行的指令。包含检查逻辑。
+                注意: 工具会自动在 note_text 末尾注入删除指令。
         """
         cron_mgr = getattr(self.context, "cron_manager", None)
         if cron_mgr is None:
@@ -571,10 +572,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 "请确认已启用 AstrBot 的主动型能力。"
             )
 
-        # 用服务器系统时钟计算绝对时间
-        now = datetime.datetime.now(datetime.timezone.utc).astimezone()
-        run_at = now + datetime.timedelta(seconds=delay_seconds)
-        run_at_iso = run_at.isoformat()
+        # 下限 180s（3 分钟）
+        interval = max(180, int(interval_seconds))
+
+        # 构建 cron 表达式（支持秒级）
+        cron_expr = f"*/{interval} * * * * *"
 
         # 构造 payload
         payload = {
@@ -588,24 +590,29 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             from astrbot.core.cron.manager import CronJobSchedulingError
             job = await cron_mgr.add_active_job(
                 name=f"check_upload_{file_name}",
-                cron_expression=None,
+                cron_expression=cron_expr,
                 payload=payload,
                 description=note_text,
-                run_once=True,
-                run_at=run_at,
+                run_once=False,
             )
         except CronJobSchedulingError:
             return "❌ 安排检查失败: cron 调度器配置无效。"
         except Exception as e:
             return f"❌ 安排检查失败: {e!s}"
 
+        # 计算首次触发时间用于展示
+        now = datetime.datetime.now(datetime.timezone.utc).astimezone()
+        first_run = now + datetime.timedelta(seconds=interval)
+
         return (
-            f"✅ 已安排检查任务\n"
+            f"✅ 已安排重复检查任务\n"
             f"- 文件名: {file_name}\n"
             f"- 任务ID: {job.job_id}\n"
-            f"- 计划执行时间: {run_at_iso}\n"
-            f"- 延迟: {self._format_duration(delay_seconds)}\n"
-            f"⏰ AstrBot 将在计划时间自动唤醒并执行 note 中的指令。"
+            f"- 轮询间隔: {self._format_duration(interval)}\n"
+            f"- 预计首次触发: {first_run.isoformat()}\n"
+            f"- 删除指令: 上传完成后，调用 future_task(action=\"delete\", job_id=\"{job.job_id}\")"
+            f" 停止此重复任务，然后继续处理下一个文件。\n"
+            f"⏰ AstrBot 将每 {self._format_duration(interval)} 自动唤醒并检查。"
         )
 
     # ── Tool 3e: Estimate upload time ─────────────────────────────
@@ -649,8 +656,8 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         estimated_chunks = max(1, int(estimated_chars / effective_chunk_size))
         estimated_seconds = estimated_chunks * self._avg_embedding_time
 
-        # 推荐轮询间隔：min(10min, 预估耗时/10)
-        polling_interval = max(30, min(600, int(estimated_seconds / 10)))
+        # 推荐轮询间隔：min(10min, max(3min, 预估耗时/10))
+        polling_interval = max(180, min(600, int(estimated_seconds / 10)))
         polling_str = self._format_duration(polling_interval)
 
         # 判断策略
@@ -659,7 +666,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         elif estimated_seconds <= 30:
             strategy = "✅ 极快（< 30s），可直接 astr_kb_upload（同步）或 astr_kb_upload_batch"
         elif estimated_seconds <= 100:
-            strategy = "✅ 较快（< 框架 120s 限制），可使用 astr_kb_upload（同步）"
+            strategy = "✅ 较快，可使用 astr_kb_upload（同步）"
         else:
             strategy = "⚠️ 可能超时，必须使用 astr_kb_upload(wait_completion=false) + 轮询"
 

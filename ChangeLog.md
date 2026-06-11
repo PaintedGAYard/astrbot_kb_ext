@@ -1,5 +1,15 @@
 # AstrBot KB External Access — ChangeLog
 
+## v0.5.1 (2026-06-11)
+
+### 变更
+
+- `astr_kb_schedule_check` 从一次性模式改为重复 cron 模式（`interval_seconds`），不再需要回调链
+- 轮询间隔下限从 30s 提高至 180s（3 分钟）
+- 清理所有 SKILL.md 和 docstring 中的冗余/误导性内容，移除 "120s 框架限制" 相关描述
+
+---
+
 ## v0.5.0 (2026-06-10)
 
 ### 新增

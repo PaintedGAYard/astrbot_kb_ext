@@ -34,9 +34,7 @@ Call this BEFORE uploading ANY file. Use the output to decide which upload strat
 Estimates for compressed formats (XLSX, DOCX, EPUB) can be inaccurate because
 compression ratios vary widely. A file estimated at 52s may actually take 100s+.
 
-**If a sync upload times out (tool returns timeout error), do NOT retry sync with
-a higher timeout. Switch to Strategy C (async + FutureTask) instead.** The framework
-has a 120s hard limit — no timeout value can bypass it.
+**If a sync upload times out, do NOT retry with a higher timeout. Switch to Strategy C (async).**
 
 ## Rules
 - You MUST call this before every upload to choose the correct strategy.

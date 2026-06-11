@@ -5,17 +5,14 @@ description: Upload files synchronously or in batch — for files estimated to c
 
 # Strategy A & B: Fast Upload — Sync and Batch
 
-Covers two strategies for files that do NOT exceed the 120s framework timeout.
-
-## When to use these strategies
+## When to use
 
 | Strategy | Condition |
 |----------|-----------|
 | **A — Sync Upload** | Single file, estimated time < 100s (strategy contains "极快" or "较快") |
 | **B — Batch Upload** | Multiple files, ALL estimated time < 30s (strategy contains "极快") |
 
-## Prerequisite
-You MUST have already called `astr_kb_estimate_upload_time` for each file and confirmed the strategy is appropriate.
+Call `astr_kb_estimate_upload_time` first to confirm the strategy.
 
 ---
 
@@ -76,7 +73,7 @@ You MUST have already called `astr_kb_estimate_upload_time` for each file and co
 | `sandbox_path` | "" | File path in the sandbox — preferred method. |
 | `chunk_size` | 512 | Characters per chunk. |
 | `chunk_overlap` | 50 | Character overlap between chunks. |
-| `timeout` | 100 | Max seconds per attempt. 0 = infinite. Framework has 120s hard limit. |
+| `timeout` | 100 | Max seconds per attempt. If it times out, switch to async mode. |
 | `max_retries` | 3 | Retry count on failure. 0 = no retry. |
 | `wait_completion` | true | Set to `false` ONLY for Strategy C (async). |
 

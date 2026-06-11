@@ -41,9 +41,3 @@ This plugin provides tools for knowledge base management with access control.
 | Excel | `.xls` `.xlsx` BOTH supported |
 
 For any other format (e.g. `.doc`, `.ppt`), extract text first and upload as `.md`.
-```
-
-## General rules
-- Always `astr_kb_list` first to get kb_id before file operations
-- Report results with key info: doc_id, chunk count, success/failure
-- Delete ops MUST ask user confirmation first
