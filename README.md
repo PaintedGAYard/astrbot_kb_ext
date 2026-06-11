@@ -119,19 +119,19 @@ Output: `.\out\astrbot_kb_ext_access_<version>.zip`
 ## Project Structure
 
 ```
-astrbot_kb_tools/
+ProjectRoot/
 ├── build.ps1                          # Build script (reads version from metadata.yaml)
 ├── LICENSE                            # MIT License
 ├── ChangeLog.md
 ├── README.md
-├── src/astrbot_kb_ext_access/         # Plugin source
+├── src/                               # Plugin source
 │   ├── __init__.py                    # Package init, __version__ from metadata.yaml
 │   ├── main.py                        # Star class + 12 @llm_tool
 │   ├── access_control.py              # Whitelist/blacklist logic
 │   ├── kb_uploader.py                 # Upload logic with progress tracking & retry
 │   ├── metadata.yaml                  # Plugin metadata (single version source)
 │   ├── _conf_schema.json              # Config schema
-│   ├── .astrbot-plugin/i18n/         # Internationalization
+│   ├── .astrbot-plugin/i18n/          # Internationalization
 │   ├── pages/access-control/          # Plugin settings web page
 │   └── skills/                        # 11 Agent SKILL.md files
 └── out/                               # Build output (.zip archives)
