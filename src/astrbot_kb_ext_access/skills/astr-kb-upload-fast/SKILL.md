@@ -62,20 +62,6 @@ Call `astr_kb_estimate_upload_time` first to confirm the strategy.
 
 ---
 
-## Tool Parameters Reference: `astr_kb_upload`
-
-| Param | Default | Description |
-|-------|---------|-------------|
-| `kb_id` | required | From `astr_kb_list`. |
-| `file_name` | required | Include extension. |
-| `file_content` | "" | Text or base64 data (used when sandbox_path is empty). |
-| `binary` | false | True if file_content is base64-encoded. |
-| `sandbox_path` | "" | File path in the sandbox — preferred method. |
-| `chunk_size` | 512 | Characters per chunk. |
-| `chunk_overlap` | 50 | Character overlap between chunks. |
-| `timeout` | 100 | Max seconds per attempt. If it times out, switch to async mode. |
-| `max_retries` | 3 | Retry count on failure. 0 = no retry. |
-| `wait_completion` | true | Set to `false` ONLY for Strategy C (async). |
 
 ## Supported file formats (exhaustive)
 | Category | Extensions |

@@ -27,14 +27,16 @@ recurring task and starts the next file.
 ## How it works
 
 ```
-Step 1: Upload file_1 (async)
-Step 2: astr_kb_schedule_check(interval_seconds=180)  →  creates recurring cron
-Step 3: (cron fires every 180s) → check file_1
+Step 1: Upload file_1 (async)             → returns upload_task_id="uuid-1"
+Step 2: astr_kb_schedule_check(upload_task_id="uuid-1", interval_seconds=180)  → creates recurring cron
+Step 3: (cron fires every 180s) → check by upload_task_id
         ├── not done? → do nothing, cron fires again later
-        └── done?     → future_task(action="delete", job_id=xxx) to stop cron
-                        then upload file_2 and repeat
+        └── done?     → report result, then upload file_2 and repeat
 ... until all files done
 ```
+
+Each upload gets a unique `upload_task_id` (UUID). Use this ID for all
+subsequent check and schedule calls — do NOT use file_name.
 
 ---
 
@@ -42,7 +44,7 @@ Step 3: (cron fires every 180s) → check file_1
 
 ### Instructions
 1. `astr_kb_list()` to get `kb_id`.
-2. For each file: `ls -l` → `astr_kb_estimate_upload_time` → record `推荐轮询间隔`.
+2. For each file: `ls -l` → `astr_kb_estimate_upload_time` → record polling interval.
 3. Take the FIRST file from the list.
 
 ---
@@ -59,23 +61,18 @@ Step 3: (cron fires every 180s) → check file_1
      "wait_completion": false
    }
    ```
-   If it returns "❌ 已有异步上传进行中", stop — a previous upload is still running.
+   Returns JSON: `{"s":true, "d":{"upload_task_id":"uuid-xxx", "pending":true}}`
+   Save the `upload_task_id` — you need it for all subsequent calls.
+   If `s=false` and `e` mentions "已有异步上传进行中", stop.
 
-2. Call `astr_kb_schedule_check` (recurring mode):
+2. Call `astr_kb_schedule_check` with the upload_task_id:
    ```json
    {
-     "file_name": "file_1.xlsx",
-     "interval_seconds": 180,
-     "note_text": "Call astr_kb_check_upload(kb_id='<kb_id>', file_name='file_1.xlsx'). "
-                  "If result contains '已完成', first call future_task(action='delete', "
-                  "job_id='<job_id>') to stop this recurring check. Then report doc_id "
-                  "and chunk_count to the user. Then upload the next file and schedule "
-                  "another recurring check for it. "
-                  "If result contains '处理中' or '不在知识库中', do nothing — "
-                  "this recurring cron will fire again automatically."
+     "upload_task_id": "uuid-xxx",
+     "interval_seconds": 180
    }
    ```
-   The return message includes the `job_id` you need for deletion.
+   Returns JSON with `d.job_id` for the cron job.
 
 3. End this response. The cron fires automatically every `interval_seconds`.
 
@@ -83,10 +80,11 @@ Step 3: (cron fires every 180s) → check file_1
 
 ## Part 3: Cron callback (when woken)
 
-1. Call `astr_kb_check_upload(kb_id="...", file_name="...")`.
-2. Act on the result:
-   - **"✅ 已完成"**: `future_task(action="delete", job_id="<job_id>")` to stop. Report to user. Start next file (go to Part 2).
-   - **"⏳ 处理中"** or **"不在知识库中"**: Do nothing. The cron fires again automatically.
+1. Call `astr_kb_check_upload(upload_task_id="uuid-xxx")`.
+2. Act on the JSON result:
+   - `d.status === "completed"`: Report doc_id and chunk_count. Upload next file (go to Part 2).
+   - `d.status === "processing"`: Do nothing. Cron fires again.
+   - `d.status === "not_found"`: Do nothing. Cron fires again.
 
 ---
 
@@ -101,20 +99,19 @@ Part 1: Prepare
 Part 2: Start file 1
   - astr_kb_upload(kb_id="abc-123", file_name="file_1.xlsx",
                    sandbox_path="/workspace/file_1.xlsx", wait_completion=false)
-  - astr_kb_schedule_check(file_name="file_1.xlsx", interval_seconds=180,
-                           note_text="Check file_1. If done, delete this job and start file_2...")
+  → get upload_task_id = "uuid-1"
+  - astr_kb_schedule_check(upload_task_id="uuid-1", interval_seconds=180)
   → End response.
 
 --- Cron fires (every 180s) ---
 
-Part 3: Check file 1 → still processing → do nothing → cron fires again
+Part 3: Check uuid-1 → processing → do nothing → cron fires again
 
 --- Cron fires again ---
 
-Part 3: Check file 1 → ✅ done
-  - future_task(action="delete", job_id="<id>")
-  - Report to user.
-  - Upload file 2 → schedule_check for file 2 → end response.
+Part 3: Check uuid-1 → completed
+  - Report doc_id and chunk_count to user.
+  - Upload file 2 → get upload_task_id → schedule_check for file 2 → end response.
 
 --- Cron fires for file 2 ---
 

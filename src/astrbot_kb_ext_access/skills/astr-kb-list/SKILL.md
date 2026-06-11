@@ -8,9 +8,6 @@ description: List available knowledge bases with kb_id, used as prerequisite for
 ## When to use
 Call this tool BEFORE any knowledge base operation (upload, create, delete, search). It returns the `kb_id` required by all other KB tools. The output is pre-filtered by the plugin's whitelist/blacklist configuration.
 
-## Parameters
-- `query` (string, optional): A keyword to filter knowledge bases by name.
-
 ## Instructions
 1. Call `astr_kb_list()` with a `query` if you know part of the KB name, otherwise call without parameters.
 2. Read the returned list to find the target KB's `kb_id`.

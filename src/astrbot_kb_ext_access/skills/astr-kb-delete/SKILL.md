@@ -8,12 +8,6 @@ description: Permanently delete an entire knowledge base. IRREVERSIBLE — requi
 ## When to use
 When the user asks to delete an entire knowledge base and all its documents.
 
-## Parameters
-| Param | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `kb_id` | Yes | — | The KB ID from `astr_kb_list`. |
-| `confirm` | No | false | Set to `true` to execute the deletion. |
-
 ## Instructions
 1. Call `astr_kb_list()` to confirm the KB exists and get its `kb_id`.
 2. Ask the user for confirmation: "Are you sure you want to permanently delete KB '{name}' ({kb_id})? All documents will be lost."

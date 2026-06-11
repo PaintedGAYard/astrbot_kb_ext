@@ -1,5 +1,17 @@
 # AstrBot KB External Access — ChangeLog
 
+## v0.6.0 (2026-06-11)
+
+### 变更
+
+- 版本号集中管理：统一以 `metadata.yaml` 为唯一版本源
+- `__init__.py` 改为从 `metadata.yaml` 动态读取 `__version__`，消除硬编码和过期问题
+- `build.ps1` 保持从 `metadata.yaml` 读取版本号（已有逻辑）
+- 清理所有 SKILL.md 中与 docstring 重复的参数表和返回格式说明
+- 修改所有工具返回格式
+
+---
+
 ## v0.5.1 (2026-06-11)
 
 ### 变更

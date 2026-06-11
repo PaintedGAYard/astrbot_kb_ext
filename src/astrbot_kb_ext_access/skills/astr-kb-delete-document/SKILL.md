@@ -8,16 +8,6 @@ description: Permanently delete a specific document from a knowledge base. IRREV
 ## When to use
 When the user asks to delete a specific file or document from a knowledge base.
 
-## Parameters
-| Param | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `kb_id` | Yes | — | The KB ID from `astr_kb_list`. |
-| `doc_id` | No* | — | Document ID — XOR with `file_name`. |
-| `file_name` | No* | — | File name keyword match — XOR with `doc_id`. |
-| `confirm` | No | false | Set to `true` to execute the deletion. |
-
-*Exactly one of `doc_id` or `file_name` must be provided.
-
 ## Instructions
 1. Call `astr_kb_list()` to get the `kb_id`.
 2. Identify the document to delete. Use `astr_kb_search_ext` if needed to find the `doc_id`.

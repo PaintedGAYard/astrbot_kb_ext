@@ -40,14 +40,19 @@ class KnowledgeBaseUploader:
         # 异步上传完成回调（由插件传入，用于清理并发锁）
         self._on_async_complete = on_async_complete
 
-    def _make_progress_callback(self) -> Callable[[str, int, int], None]:
-        """创建进度回调，收集处理阶段信息。"""
+    def _make_progress_callback(self, progress_key: str | None = None) -> Callable[[str, int, int], None]:
+        """创建进度回调，收集处理阶段信息。
+        progress_key 不为空时，同步更新 _pending_store[progress_key] 用于外部轮询进度。"""
         async def _callback(stage: str, current: int, total: int) -> None:
-            self._phases.append({
-                "stage": stage,
-                "current": current,
-                "total": total,
-            })
+            entry = {"stage": stage, "current": current, "total": total}
+            self._phases.append(entry)
+            if progress_key is not None:
+                self._pending_store[progress_key] = {
+                    "status": "processing",
+                    "stage": stage,
+                    "current": current,
+                    "total": total,
+                }
         return _callback
 
     # ── Public upload methods ─────────────────────────────────────
@@ -62,6 +67,7 @@ class KnowledgeBaseUploader:
         timeout: float = 100.0,
         max_retries: int = 3,
         wait_completion: bool = True,
+        upload_task_id: str | None = None,
     ) -> dict[str, Any]:
         """执行上传并返回结构化结果。
 
@@ -79,7 +85,7 @@ class KnowledgeBaseUploader:
             max_retries: 失败重试次数。默认 3。
             wait_completion: 是否等待向量化完成。默认 True。
                 设为 False 时上传进入后台处理，适用于同步超时的文件。
-                稍后通过 get_pending_result() 获取结果。
+            upload_task_id: UUID 用于跟踪，替代 file_name 作为 pending_store 键。
 
         Returns:
             dict: 包含 result (str) 和 success (bool)。
@@ -90,7 +96,7 @@ class KnowledgeBaseUploader:
             if "." in file_name else "txt"
         )
         raw_bytes = base64.b64decode(file_content) if binary else file_content.encode("utf-8")
-        return await self._upload_with_retry(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, timeout, max_retries, wait_completion)
+        return await self._upload_with_retry(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, timeout, max_retries, wait_completion, upload_task_id)
 
     async def upload_bytes(
         self,
@@ -101,28 +107,22 @@ class KnowledgeBaseUploader:
         timeout: float = 100.0,
         max_retries: int = 3,
         wait_completion: bool = True,
+        upload_task_id: str | None = None,
     ) -> dict[str, Any]:
         """直接上传原始字节数据（由 sandbox_path 模式调用）。
 
         Upload raw bytes directly (called by sandbox_path mode).
 
         Args:
-            wait_completion: 是否等待向量化完成。默认 True。设为 False 进入异步模式。
-            适用于同步上传超时的文件。
+            upload_task_id: UUID 用于跟踪，替代 file_name 作为 pending_store 的键。
         """
         file_type = (
             file_name.rsplit(".", 1)[-1].lower()
             if "." in file_name else "txt"
         )
-        return await self._upload_with_retry(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, timeout, max_retries, wait_completion)
-
-    async def get_pending_result(self, file_name: str) -> dict[str, Any] | None:
-        """获取后台上传任务的完成结果（非阻塞）。
-
-        Retrieve the completed result of a background upload task.
-        Returns None if the task is still running or was never started.
-        """
-        return self._pending_store.pop(file_name, None)
+    async def get_pending_result(self, key: str) -> dict[str, Any] | None:
+        """获取后台上传任务的完成结果（非阻塞）。key 是 upload_task_id 或 file_name。"""
+        return self._pending_store.pop(key, None)
 
     # ── Core: retry + timeout wrapper ─────────────────────────────
 
@@ -131,10 +131,11 @@ class KnowledgeBaseUploader:
         chunk_size: int, chunk_overlap: int,
         timeout: float, max_retries: int,
         wait_completion: bool,
+        upload_task_id: str | None = None,
     ) -> dict[str, Any]:
         """带重试和超时的上传核心逻辑。"""
         if not wait_completion:
-            return await self._upload_async(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, timeout)
+            return await self._upload_async(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, timeout, upload_task_id)
 
         last_error = ""
         for attempt in range(1, max_retries + 1):
@@ -167,14 +168,15 @@ class KnowledgeBaseUploader:
         self, file_name: str, file_type: str, raw_bytes: bytes,
         chunk_size: int, chunk_overlap: int,
         timeout: float,
+        upload_task_id: str | None = None,
     ) -> dict[str, Any]:
         """异步模式：后台执行上传，短等待后返回 pending 状态。
 
         使用 asyncio.shield() 保护后台任务不被框架 120s 超时取消。
-        任务完成后结果存入 _pending_results，供 get_pending_result() 读取。
+        任务完成后结果存入 _pending_store，key 优先使用 upload_task_id。
         """
-        # 清理旧 pending 结果
-        self._pending_store.pop(file_name, None)
+        key = upload_task_id or file_name
+        self._pending_store.pop(key, None)
 
         async def _background_upload():
             """后台上传任务"""
@@ -182,7 +184,7 @@ class KnowledgeBaseUploader:
             for attempt in range(1, 4):  # 至多重试 3 次
                 self._phases.clear()
                 try:
-                    return await self._run_upload(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, 0, start)
+                    return await self._run_upload(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, 0, start, progress_key=key)
                 except Exception as e:
                     if attempt < 3:
                         await asyncio.sleep(1)
@@ -204,29 +206,27 @@ class KnowledgeBaseUploader:
         short_wait = min(timeout, 30) if timeout > 0 else 30
         try:
             result = await asyncio.wait_for(asyncio.shield(task), timeout=short_wait)
-            return result  # 短时间就完成了
+            return result
         except asyncio.TimeoutError:
-            pass  # 仍在处理，进入 pending 流程
+            pass
 
-        # 后台任务继续运行，注册完成回调存入结果
         async def _store_result():
             try:
                 result = await asyncio.shield(task)
-                self._pending_store[file_name] = result
+                self._pending_store[key] = result
             except asyncio.CancelledError:
-                self._pending_store[file_name] = {
+                self._pending_store[key] = {
                     "success": False,
                     "result": f"❌ {file_name}: 后台上传被取消",
                 }
             except Exception as e:
-                self._pending_store[file_name] = {
+                self._pending_store[key] = {
                     "success": False,
                     "result": f"❌ {file_name}: 后台上传失败 — {e!s}",
                 }
             finally:
-                # 通知插件释放并发锁
                 if self._on_async_complete is not None:
-                    await self._on_async_complete(file_name)
+                    await self._on_async_complete(key)
 
         asyncio.create_task(_store_result())
 
@@ -245,6 +245,7 @@ class KnowledgeBaseUploader:
         self, file_name: str, file_type: str, raw_bytes: bytes,
         chunk_size: int, chunk_overlap: int,
         timeout: float, start_time: float,
+        progress_key: str | None = None,
     ) -> dict[str, Any]:
         """单次上传执行（写入临时文件 → 调用 kb_helper）。"""
         tmp = tempfile.NamedTemporaryFile(suffix=f".{file_type}", delete=False)
@@ -252,7 +253,7 @@ class KnowledgeBaseUploader:
             tmp.write(raw_bytes)
             tmp.close()
 
-            progress_cb = self._make_progress_callback()
+            progress_cb = self._make_progress_callback(progress_key)
             upload_coro = self._kb_helper.upload_document(
                 file_name=file_name,
                 file_content=raw_bytes,

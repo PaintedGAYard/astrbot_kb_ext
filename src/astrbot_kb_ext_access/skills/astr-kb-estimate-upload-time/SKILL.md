@@ -8,27 +8,20 @@ description: Estimate vectorization time for a file to determine upload strategy
 ## When to use
 Call this BEFORE uploading ANY file. Use the output to decide which upload strategy to follow. Also use the output's `recommended polling interval` to schedule FutureTask delays.
 
-## Parameters
-| Param | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `file_size_bytes` | Yes | — | File size in bytes. Get from `ls -l` or `stat` in the sandbox. |
-| `file_name` | Yes | — | File name WITH extension. Extension determines the text density ratio used in estimation. |
-| `chunk_size` | No | 512 | Chunk size in characters. |
-| `chunk_overlap` | No | 50 | Chunk overlap in characters. |
-
 ## Instructions
 1. In the sandbox, run `ls -l /path/to/file` to get `file_size_bytes`.
 2. Call `astr_kb_estimate_upload_time(file_size_bytes=N, file_name="doc.pdf")`.
-3. Read the output:
-   - `建议策略` tells you which upload strategy to use.
-   - `推荐轮询间隔` gives the polling interval in seconds for FutureTask scheduling.
+3. Parse the JSON result:
+   - `d.strategy` tells you which upload strategy to use.
+   - `d.polling_interval_seconds` gives the polling interval for FutureTask.
+   - `d.strategy_label` is a human-readable description.
 
 ## Output interpretation
-| Strategy label | Meaning | Action |
+| `d.strategy` | Meaning | Action |
 |---|---|---|
-| Contains "极快" | < 30s | Use Strategy A (sync) or Strategy B (batch for multiple files). |
-| Contains "较快" | 30-100s | Use Strategy A (sync). Do NOT batch. |
-| Contains "超时" or "必须异步" | > 100s | MUST use Strategy C (async + FutureTask). |
+| `"sync_fast"` | < 30s | Use Strategy A (sync) or Strategy B (batch). |
+| `"sync"` | 30-100s | Use Strategy A (sync). Do NOT batch. |
+| `"async"` | > 100s | MUST use Strategy C (async + FutureTask). |
 
 ## Accuracy warning
 Estimates for compressed formats (XLSX, DOCX, EPUB) can be inaccurate because
@@ -38,5 +31,5 @@ compression ratios vary widely. A file estimated at 52s may actually take 100s+.
 
 ## Rules
 - You MUST call this before every upload to choose the correct strategy.
-- Read the `推荐轮询间隔` value — it is used in `future_task` scheduling.
+- Read `d.polling_interval_seconds` — it is used for `astr_kb_schedule_check`.
 - If a sync upload times out, re-classify the file as async and use Strategy C.

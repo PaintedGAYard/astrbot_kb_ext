@@ -19,6 +19,8 @@ This plugin provides tools for knowledge base management with access control.
 | `astr_kb_create` | `astr-kb-create/` | Create a new KB |
 | `astr_kb_delete` | `astr-kb-delete/` | Delete an entire KB |
 | `astr_kb_delete_document` | `astr-kb-delete-document/` | Delete a document from a KB |
+| `astr_kb_list_documents` | `astr-kb-list-documents/` | List all documents in a KB |
+| `astr_kb_get_document_content_chunk` | `astr-kb-get-document/` | Get one text chunk by index |
 | `astr_kb_search_ext` | `astr-kb-search-ext/` | Access-controlled search |
 
 ## HARD RULES (apply to all tools)

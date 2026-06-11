@@ -19,11 +19,6 @@ User mentions a specific KB by name?
         → If no results, suggest astr_kb_search_ext
 ```
 
-## Parameters
-| Param | Required | Description |
-|-------|----------|-------------|
-| `query` | Yes | Search query string. |
-
 ## Comparison
 | Tool | Search scope | Access control |
 |------|-------------|----------------|

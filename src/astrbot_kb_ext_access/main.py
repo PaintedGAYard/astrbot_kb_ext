@@ -1,11 +1,13 @@
 """AstrBot KB External Access Plugin — main entry point.
 
-Provides five Agent-facing LLM tools:
-  - astr_kb_list           : List available knowledge bases
-  - astr_kb_upload         : Upload a file to a knowledge base
-  - astr_kb_create         : Create a new knowledge base
-  - astr_kb_delete         : Delete a knowledge base
-  - astr_kb_delete_document: Delete a document from a knowledge base
+Provides Agent-facing LLM tools:
+  - astr_kb_list              : List available knowledge bases
+  - astr_kb_upload            : Upload a file to a knowledge base
+  - astr_kb_create            : Create a new knowledge base
+  - astr_kb_delete            : Delete a knowledge base
+  - astr_kb_delete_document   : Delete a document from a knowledge base
+  - astr_kb_list_documents    : List documents in a knowledge base
+  - astr_kb_get_document      : Get full text content of a document
 
 All tools bypass HTTP and directly call kb_manager Python APIs within
 the AstrBot process. Access is controlled by KbAccessControl
@@ -20,6 +22,8 @@ from .access_control import KbAccessControl
 from .kb_uploader import KnowledgeBaseUploader
 
 import datetime
+import json as _json
+import uuid
 
 
 class AstrBotKnowledgeBaseExtAccess(star.Star):
@@ -35,14 +39,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
     ) -> None:
         self.context = context
         raw_config = dict(config) if config else {}
-        # config is an AstrBotConfig dict-like object from _conf_schema.json
         self.access_control = KbAccessControl(raw_config)
         self._avg_embedding_time: float = float(
             raw_config.get("avg_embedding_time", 1.5)
         )
-        # 异步上传并发控制 & 共享结果存储
-        self._async_pending: dict[str, dict] = {}
-        self._async_upload_in_progress: str | None = None
+        self._async_pending: dict[str, dict] = {}  # upload_task_id → result/progress
 
     async def initialize(self) -> None:
         """初始化插件：校验配置，注册插件页面 API。
@@ -192,6 +193,25 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         List all available knowledge bases in AstrBot.
 
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // list of knowledge bases
+                    "kb_id": string,
+                    "kb_name": string,
+                    "doc_count": number,
+                    "chunk_count": number,
+                    "description": string | null
+                }[],
+                "e": null // no error
+            } | {
+                "s": false, // error
+                "d": null,
+                "e": string // error message
+            }
+            ```
+
         Args:
             query(string): 可选，用于过滤知识库名称的关键词
         """
@@ -206,17 +226,17 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             q = query.lower()
             kbs = [kb for kb in kbs if q in kb.kb_name.lower()]
 
-        if not kbs:
-            return "当前没有可用的知识库。"
-
-        lines = [f"可用知识库列表（共 {len(kbs)} 个）："]
-        for kb in kbs:
-            desc = (kb.description or "").strip() or "(无描述)"
-            lines.append(
-                f'- kb_id: "{kb.kb_id}" | name: "{kb.kb_name}" | '
-                f"文档: {kb.doc_count} | 切片: {kb.chunk_count} | {desc}"
-            )
-        return "\n".join(lines)
+        data = [
+            {
+                "kb_id": kb.kb_id,
+                "kb_name": kb.kb_name,
+                "doc_count": kb.doc_count,
+                "chunk_count": kb.chunk_count,
+                "description": (kb.description or "").strip() or None,
+            }
+            for kb in kbs
+        ]
+        return _json.dumps({"s": True, "d": data, "e": None})
 
     # ── Tool 2: Upload file to knowledge base ─────────────────────
 
@@ -238,8 +258,34 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         """向指定的 AstrBot 知识库上传文件。
 
         Upload file content to a specified knowledge base.
-        优先使用 sandbox_path 直接传输二进制文件，其次使用 file_content。
-        上传会等待向量化完成，大文件可能耗时较长。
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // sync upload succeeded
+                    "pending": false,
+                    "doc_id": string,
+                    "file_name": string,
+                    "chunk_count": number,
+                    "kb_id": string
+                },
+                "e": null
+            } | {
+                "s": true, // submitted to background
+                "d": {
+                    "pending": true,
+                    "upload_task_id": string,
+                    "file_name": string,
+                    "kb_id": string
+                },
+                "e": null
+            } | {
+                "s": false, // error
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
             kb_id(string): 目标知识库ID
@@ -259,42 +305,29 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 不等待向量化。适用于同步上传超时的文件。
                 提交后必须使用 future_task 安排轮询检查，不得主动轮询。
                 ⚠️ 并发限制: 同一时间只允许一个 wait_completion=false 上传。
-                若有其他异步上传进行中，工具会拒绝。请通过 future_task
-                链式回调逐个上传。
+                若有其他异步上传进行中，工具会拒绝。
         """
-        # 权限检查：白名单/黑名单（ID 已在 initialize() 中解析完成）
         try:
             self.access_control.check_kb_access(kb_id)
         except PermissionError as e:
-            return f"❌ 权限不足: {e}"
+            return _json.dumps({"s": False, "d": None, "e": f"权限不足: {e}"})
 
-        # 获取知识库
         kb_helper = await self.context.kb_manager.get_kb(kb_id)
         if not kb_helper:
-            return (
-                f"❌ 上传失败\n"
-                f"- 错误: 知识库 {kb_id} 不存在或未加载。\n"
-                f"请先调用 astr_kb_list 确认可用的知识库 ID。"
-            )
+            return _json.dumps({"s": False, "d": None, "e": f"知识库 {kb_id} 不存在。"})
 
-        # 并发控制：同一时间只允许一个异步上传
         if not wait_completion:
-            if self._async_upload_in_progress is not None:
-                return (
-                    f"❌ 已有异步上传进行中: {self._async_upload_in_progress}\n"
-                    f"请先使用 astr_kb_check_upload 查询该文件的状态。\n"
-                    f"完成后再提交下一个。正确做法: 在 future_task 的 note 中"
-                    f"嵌入下一个文件的上传指令，让回调链自动处理所有文件。\n"
-                    f"不要同时启动多个 wait_completion=false——工具会拒绝。"
-                )
-            self._async_upload_in_progress = file_name
+            # 数据库级分布式锁：检查是否有活跃的上传检查 cron job
+            if await self._has_active_upload_lock():
+                return _json.dumps({"s": False, "d": None, "e": "已有异步上传进行中（存在活跃的 upload_check cron job）"})
+            upload_task_id = str(uuid.uuid4())
+            self._async_pending[upload_task_id] = {"pending": True, "file_name": file_name, "kb_id": kb_id}
+        else:
+            upload_task_id = None
 
-        # 定义异步上传完成回调（释放并发锁）
-        async def _on_async_done(done_file: str) -> None:
-            if self._async_upload_in_progress == done_file:
-                self._async_upload_in_progress = None
+        async def _on_async_done(done_uid: str) -> None:
+            pass  # 锁由 cron job 管理，上传完成无需释放
 
-        # 执行上传（共享 pending_store 确保跨工具调用可读取结果）
         uploader = KnowledgeBaseUploader(
             kb_helper,
             pending_store=self._async_pending,
@@ -302,7 +335,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         )
 
         if sandbox_path:
-            # 通过沙箱 Python 执行读取二进制文件并 base64 编码，避免 LLM 中转
             try:
                 from astrbot.core.computer.computer_client import get_booter
                 import base64
@@ -314,35 +346,34 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 )
                 py_result = await sb.python.exec(py_code, timeout=60)
                 if not py_result.get("success", True):
-                    err = py_result.get("error", "unknown error")
-                    return f"❌ 上传失败\n- 错误: 沙箱读取文件失败 — {err}"
+                    return _json.dumps({"s": False, "d": None, "e": f"沙箱读取文件失败: {py_result.get('error', 'unknown')}"})
                 b64_data = (py_result.get("output", "") or "").strip()
                 if not b64_data:
-                    return "❌ 上传失败\n- 错误: 沙箱返回空数据"
+                    return _json.dumps({"s": False, "d": None, "e": "沙箱返回空数据"})
                 raw_bytes = base64.b64decode(b64_data)
             except Exception as e:
-                return f"❌ 上传失败\n- 错误: 无法从沙箱读取文件 — {e!s}"
+                return _json.dumps({"s": False, "d": None, "e": f"无法从沙箱读取文件: {e!s}"})
             result = await uploader.upload_bytes(
-                file_name=file_name,
-                raw_bytes=raw_bytes,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                timeout=timeout,
-                max_retries=max_retries,
+                file_name=file_name, raw_bytes=raw_bytes,
+                chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                timeout=timeout, max_retries=max_retries,
                 wait_completion=wait_completion,
+                upload_task_id=upload_task_id,
             )
         else:
             result = await uploader.upload(
-                file_name=file_name,
-                file_content=file_content,
-                binary=binary,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                timeout=timeout,
-                max_retries=max_retries,
+                file_name=file_name, file_content=file_content, binary=binary,
+                chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                timeout=timeout, max_retries=max_retries,
                 wait_completion=wait_completion,
+                upload_task_id=upload_task_id,
             )
-        return result["result"]
+
+        if result.get("pending"):
+            return _json.dumps({"s": True, "d": {"pending": True, "upload_task_id": upload_task_id, "file_name": file_name, "kb_id": kb_id}, "e": None})
+        if result.get("success"):
+            return _json.dumps({"s": True, "d": {"result_text": result["result"]}, "e": None})
+        return _json.dumps({"s": False, "d": None, "e": result.get("result", "上传失败")})
 
     # ── Tool 3b: Batch upload files ───────────────────────────────
 
@@ -355,11 +386,29 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         """批量上传多个文件到知识库，逐个上传，阻断等待。
 
         Batch upload multiple files to a knowledge base.
-        Processes files SEQUENTIALLY with blocking waits — each file must
-        complete vectorization before the next starts.
-        注意: 仅用于所有文件预估耗时均 < 30s 的场景。
-        如果任何一个文件同步超时，该文件及其后的所有文件都会失败。
-        大文件请使用 astr_kb_upload(wait_completion=false) 逐个异步上传。
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // batch results
+                    "total": number,
+                    "success": number,
+                    "fail": number,
+                    "results": {
+                        "i": number, // item index (1-based)
+                        "file_name": string | null,
+                        "ok": boolean,
+                        "e": string | null // error message if failed
+                    }[]
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
             files(list): 上传任务列表，每项为 dict:
@@ -374,43 +423,43 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 - max_retries(number): 可选，默认 3
         """
         if not files:
-            return "❌ 批量上传: 文件列表为空。"
+            return _json.dumps({"s": False, "d": None, "e": "文件列表为空。"})
         if len(files) > 20:
-            return "❌ 批量上传: 单次最多上传 20 个文件。"
+            return _json.dumps({"s": False, "d": None, "e": "单次最多上传 20 个文件。"})
 
-        results: list[str] = []
+        item_results: list[dict] = []
         success_count = 0
         fail_count = 0
 
         for i, item in enumerate(files, 1):
             if not isinstance(item, dict):
-                results.append(f"[{i}] ❌ 无效的条目格式（非 dict）")
+                item_results.append({"i": i, "file_name": None, "ok": False, "e": "无效的条目格式"})
                 fail_count += 1
                 continue
 
             kb_id = item.get("kb_id", "")
             file_name = item.get("file_name", "")
             if not kb_id or not file_name:
-                results.append(f"[{i}] ❌ 缺少 kb_id 或 file_name")
+                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": "缺少 kb_id 或 file_name"})
                 fail_count += 1
                 continue
 
-            # 权限检查
             try:
                 self.access_control.check_kb_access(kb_id)
             except PermissionError as e:
-                results.append(f"[{i}] ❌ {file_name}: 权限不足 — {e}")
+                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": f"权限不足: {e}"})
                 fail_count += 1
                 continue
 
-            # 获取知识库
             kb_helper = await self.context.kb_manager.get_kb(kb_id)
             if not kb_helper:
-                results.append(f"[{i}] ❌ {file_name}: 知识库 {kb_id} 不存在")
+                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": f"知识库 {kb_id} 不存在"})
                 fail_count += 1
                 continue
 
-            uploader = KnowledgeBaseUploader(kb_helper)
+            uploader = KnowledgeBaseUploader(kb_helper,
+                pending_store=self._async_pending,
+            )
             timeout = float(item.get("timeout", 100))
             max_retries = int(item.get("max_retries", 3))
             sandbox_path = item.get("sandbox_path", "") or ""
@@ -431,7 +480,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                     )
                     py_result = await sb.python.exec(py_code, timeout=60)
                     if not py_result.get("success", True):
-                        results.append(f"[{i}] ❌ {file_name}: 沙箱读取失败")
+                        item_results.append({"i": i, "file_name": file_name, "ok": False, "e": "沙箱读取失败"})
                         fail_count += 1
                         continue
                     raw = b64.b64decode((py_result.get("output", "") or "").strip())
@@ -449,28 +498,27 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                         wait_completion=True,
                     )
             except Exception as e:
-                results.append(f"[{i}] ❌ {file_name}: {e!s}")
+                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": str(e)})
                 fail_count += 1
                 continue
 
             if r.get("success"):
                 success_count += 1
-                # 只取结果的第一行（✅ 上传成功）和文件名/文档ID行
-                lines = r["result"].split("\n")
-                summary = lines[0]
-                for line in lines[1:]:
-                    if "文件名" in line or "文档ID" in line or "切片数" in line:
-                        summary += f"\n  {line.strip()}"
-                results.append(f"[{i}] {summary}")
+                item_results.append({"i": i, "file_name": file_name, "ok": True, "e": None})
             else:
                 fail_count += 1
-                results.append(f"[{i}] {r['result']}")
+                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": r.get("result", "上传失败")})
 
-        summary = (
-            f"📊 批量上传完成: {success_count} 成功, {fail_count} 失败"
-            f"（共 {len(files)} 个）"
-        )
-        return summary + "\n\n" + "\n\n".join(results)
+        return _json.dumps({
+            "s": True,
+            "d": {
+                "total": len(files),
+                "success": success_count,
+                "fail": fail_count,
+                "results": item_results,
+            },
+            "e": None,
+        })
 
     # ── Tool 3c: Check pending upload status ──────────────────────
 
@@ -478,69 +526,96 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
     async def check_upload_status(
         self,
         event: AstrMessageEvent,
-        kb_id: str,
-        file_name: str,
+        upload_task_id: str = "",
+        file_name: str = "",
+        kb_id: str = "",
     ) -> str:
-        """查询后台上传任务的完成状态（与 wait_completion=False 配合使用）。
+        """查询后台上传任务的完成状态。
 
-        Check if a background upload (started with wait_completion=False)
-        has finished vectorization.
+        Check if a background upload has finished vectorization.
+        优先使用 upload_task_id（UUID）查询，其次用 file_name + kb_id 回退。
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // completed
+                    "status": "completed",
+                    "doc_id": string,
+                    "chunk_count": number
+                },
+                "e": null
+            } | {
+                "s": true,
+                "d": { // still processing
+                    "status": "processing",
+                    "stage": "pending" | "parsing" | "chunking" | "embedding" | "extracting" | "cleaning" | "unknown",
+                    "current": number,
+                    "total": number
+                },
+                "e": null
+            } | {
+                "s": true,
+                "d": { "status": "not_found" }, // file not in KB yet
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
-            kb_id(string): 知识库 ID
-            file_name(string): 文件名
+            upload_task_id(string): 上传任务 UUID（从 astr_kb_upload 返回，推荐）
+            file_name(string): 文件名（当 upload_task_id 为空时的回退）
+            kb_id(string): 知识库 ID（当 upload_task_id 为空时的回退）
         """
-        # 先查共享 pending_store（跨工具调用持久化）
-        cached = self._async_pending.pop(file_name, None)
-        if cached:
-            return cached["result"]
+        # 优先用 upload_task_id 查 pending_store
+        if upload_task_id:
+            cached = self._async_pending.get(upload_task_id)
+            if cached:
+                if "stage" in cached:
+                    return _json.dumps({"s": True, "d": {
+                        "status": "processing",
+                        "stage": cached["stage"],
+                        "current": cached.get("current", 0),
+                        "total": cached.get("total", 100),
+                    }, "e": None})
+                if cached.get("pending"):
+                    return _json.dumps({"s": True, "d": {"status": "processing", "stage": "pending", "current": 0, "total": 0}, "e": None})
+                if cached.get("success"):
+                    self._async_pending.pop(upload_task_id, None)
+                    return _json.dumps({"s": True, "d": {"status": "completed", "doc_id": cached.get("doc_id"), "chunk_count": cached.get("chunk_count")}, "e": None})
+                self._async_pending.pop(upload_task_id, None)
+                return _json.dumps({"s": False, "d": None, "e": cached.get("result", "上传失败")})
 
-        # 没有缓存 → 看是否有异步上传正在运行
-        if self._async_upload_in_progress == file_name:
-            return (
-                f"⏳ 文件 {file_name} 正在后台处理中，请稍后再查。\n"
-                f"注意: 同一时间只能有一个异步上传，请等待当前文件完成。"
-            )
-        if self._async_upload_in_progress is not None:
-            return (
-                f"⏳ 当前有另一个异步上传正在进行: {self._async_upload_in_progress}\n"
-                f"文件 {file_name} 尚未开始上传或已被取消。请等待当前上传完成。"
-            )
+            # 缓存中没有但 cron job 存在 → 仍在处理中（可能跨实例）
+            if await self._has_active_upload_lock():
+                return _json.dumps({"s": True, "d": {"status": "processing", "stage": "unknown", "current": 0, "total": 0}, "e": None})
 
-        # 没有任何异步任务 → 查知识库文档列表确认是否已完成
-        kb_helper = await self.context.kb_manager.get_kb(kb_id)
-        if not kb_helper:
-            return f"❌ 知识库 {kb_id} 不存在。"
+        # 回退：用 file_name + kb_id 查知识库
+        if file_name and kb_id:
+            try:
+                self.access_control.check_kb_access(kb_id)
+            except PermissionError:
+                pass  # 仅查询，不阻止
 
-        try:
-            docs = await kb_helper.list_documents()
-        except Exception as e:
-            return f"❌ 查询文档列表失败: {e!s}"
+            kb_helper = await self.context.kb_manager.get_kb(kb_id)
+            if not kb_helper:
+                return _json.dumps({"s": False, "d": None, "e": f"知识库 {kb_id} 不存在。"})
+            try:
+                docs = await kb_helper.list_documents()
+            except Exception as e:
+                return _json.dumps({"s": False, "d": None, "e": f"查询失败: {e}"})
+            for doc in docs or []:
+                if doc.file_name == file_name or doc.doc_id == file_name:
+                    chunk_count = getattr(doc, "chunk_count", 0)
+                    if chunk_count > 0:
+                        return _json.dumps({"s": True, "d": {"status": "completed", "doc_id": doc.doc_id, "chunk_count": chunk_count}, "e": None})
+                    return _json.dumps({"s": True, "d": {"status": "processing"}, "e": None})
+            return _json.dumps({"s": True, "d": {"status": "not_found"}, "e": None})
 
-        target = None
-        for doc in docs or []:
-            if doc.file_name == file_name or doc.doc_id == file_name:
-                target = doc
-                break
-
-        if not target:
-            return (
-                f"⏳ 文件 {file_name} 不在知识库中，可能尚未开始上传。\n"
-                f"请使用 astr_kb_upload 重新提交。"
-            )
-
-        chunk_count = getattr(target, "chunk_count", 0)
-        if chunk_count and chunk_count > 0:
-            return (
-                f"✅ 文件 {file_name} 已完成向量化。\n"
-                f"- 文档ID: {target.doc_id}\n"
-                f"- 切片数: {chunk_count}"
-            )
-
-        return (
-            f"⏳ 文件 {file_name} 向量化中 (doc_id={target.doc_id})，切片数: {chunk_count}。\n"
-            f"请稍后重试 astr_kb_check_upload。"
-        )
+        return _json.dumps({"s": False, "d": None, "e": "请提供 upload_task_id，或 file_name + kb_id。"})
 
     # ── Tool 3d: Schedule FutureTask check (server-side time) ────
 
@@ -548,66 +623,85 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
     async def schedule_upload_check(
         self,
         event: AstrMessageEvent,
-        file_name: str,
+        upload_task_id: str,
         interval_seconds: int,
-        note_text: str,
+        note_text: str = "",
     ) -> str:
         """安排一个按固定间隔重复激活的 FutureTask 来检查上传状态。
-        使用服务器系统时钟和 cron 表达式，避免 agent 时间不准。
 
-        Schedule a RECURRING FutureTask that fires every N seconds to
-        check upload status. When the upload completes, the agent should
-        delete this task (see note_text for the deletion instruction).
+        Schedule a RECURRING FutureTask to check upload status.
+        Payload 中包含 upload_task_id，即使插件重启也能通过 cron DB 恢复。
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // scheduled
+                    "job_id": string,
+                    "upload_task_id": string,
+                    "interval_seconds": number
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
-            file_name(string): 文件名，用于任务标签
+            upload_task_id(string): 上传任务 UUID（从 astr_kb_upload 返回）
             interval_seconds(number): 轮询间隔（秒），最小 180（3分钟）
-            note_text(string): 被唤醒时要执行的指令。包含检查逻辑。
-                注意: 工具会自动在 note_text 末尾注入删除指令。
+            note_text(string): 被唤醒时的指令。默认自动生成。
         """
         cron_mgr = getattr(self.context, "cron_manager", None)
         if cron_mgr is None:
-            return (
-                "❌ 无法安排检查任务: cron_manager 不可用。\n"
-                "请确认已启用 AstrBot 的主动型能力。"
-            )
+            return _json.dumps({"s": False, "d": None, "e": "cron_manager 不可用，请启用主动型能力。"})
 
-        # 下限 180s（3 分钟）
         interval = max(180, int(interval_seconds))
 
-        # 构建 cron 表达式（支持秒级）
-        cron_expr = f"*/{interval} * * * * *"
+        # 从 _async_pending 获取 file_name 和 kb_id
+        pending_info = self._async_pending.get(upload_task_id, {})
+        file_name = pending_info.get("file_name", upload_task_id[:8])
 
-        # 构造 payload
+        default_note = (
+            f"Call astr_kb_check_upload(upload_task_id='{upload_task_id}'). "
+            f"If status is 'completed', report the doc_id and chunk_count. "
+            f"If status is 'processing', do nothing — cron will fire again."
+        )
+
         payload = {
             "session": event.unified_msg_origin,
             "sender_id": event.get_sender_id(),
-            "note": note_text,
-            "origin": "tool",
+            "upload_task_id": upload_task_id,
+            "file_name": file_name,
+            "note": note_text or default_note,
+            "origin": "plugin_upload_check",
         }
 
         try:
             from astrbot.core.cron.manager import CronJobSchedulingError
             job = await cron_mgr.add_active_job(
-                name=f"check_upload_{file_name}",
-                cron_expression=cron_expr,
+                name=f"upload_check_{upload_task_id[:12]}",
+                cron_expression=f"*/{interval} * * * * *",
                 payload=payload,
-                description=note_text,
+                description=note_text or default_note,
                 run_once=False,
             )
         except CronJobSchedulingError:
-            return "❌ 安排检查失败: cron 调度器配置无效。"
+            return _json.dumps({"s": False, "d": None, "e": "cron 调度器配置无效。"})
         except Exception as e:
-            return f"❌ 安排检查失败: {e!s}"
+            return _json.dumps({"s": False, "d": None, "e": str(e)})
 
-        # 计算首次触发时间用于展示
-        now = datetime.datetime.now(datetime.timezone.utc).astimezone()
-        first_run = now + datetime.timedelta(seconds=interval)
-
-        return (
-            f"✅ 已安排重复检查任务\n"
-            f"- 文件名: {file_name}\n"
-            f"- 任务ID: {job.job_id}\n"
+        return _json.dumps({
+            "s": True,
+            "d": {
+                "job_id": job.job_id,
+                "upload_task_id": upload_task_id,
+                "interval_seconds": interval,
+            },
+            "e": None,
+        })
             f"- 轮询间隔: {self._format_duration(interval)}\n"
             f"- 预计首次触发: {first_run.isoformat()}\n"
             f"- 删除指令: 上传完成后，调用 future_task(action=\"delete\", job_id=\"{job.job_id}\")"
@@ -629,9 +723,27 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         """根据文件大小和类型预估向量化耗时，用于决定上传策略（同步/异步/批量）。
 
         Estimate vectorization time from file size and type.
-        Use this before uploading to determine the right strategy.
-        注意: XLSX/DOCX/EPUB 等压缩格式的估算可能偏小（解压后文本膨胀量不确定）。
-        如果按估算选择了同步但实际超时，说明估算不准——请直接改用异步模式。
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // estimation results
+                    "file_name": string,
+                    "file_size_bytes": number,
+                    "estimated_chunks": number,
+                    "estimated_seconds": number,
+                    "strategy": "empty" | "sync_fast" | "sync" | "async",
+                    "strategy_label": string,
+                    "polling_interval_seconds": number
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
             file_size_bytes(number): 文件大小（字节），可用 ls -l 或 stat 获得
@@ -639,7 +751,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             chunk_size(number): 分块大小，默认 512
             chunk_overlap(number): 分块重叠，默认 50
         """
-        # 文件类型 → 文本内容占比（经验值）
         ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
         text_ratio_map = {
             "txt": 1.0, "md": 1.0, "markdown": 1.0, "mkd": 1.0, "mdx": 1.0,
@@ -650,38 +761,44 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         }
         text_ratio = text_ratio_map.get(ext, 0.3)
 
-        # 计算
         estimated_chars = file_size_bytes * text_ratio
         effective_chunk_size = max(chunk_size - chunk_overlap, 1)
         estimated_chunks = max(1, int(estimated_chars / effective_chunk_size))
         estimated_seconds = estimated_chunks * self._avg_embedding_time
 
-        # 推荐轮询间隔：min(10min, max(3min, 预估耗时/10))
         polling_interval = max(180, min(600, int(estimated_seconds / 10)))
-        polling_str = self._format_duration(polling_interval)
 
-        # 判断策略
         if estimated_chunks == 0:
-            strategy = "文件为空，无需上传"
+            strategy = "empty"
         elif estimated_seconds <= 30:
-            strategy = "✅ 极快（< 30s），可直接 astr_kb_upload（同步）或 astr_kb_upload_batch"
+            strategy = "sync_fast"
         elif estimated_seconds <= 100:
-            strategy = "✅ 较快，可使用 astr_kb_upload（同步）"
+            strategy = "sync"
         else:
-            strategy = "⚠️ 可能超时，必须使用 astr_kb_upload(wait_completion=false) + 轮询"
+            strategy = "async"
 
-        return (
-            f"📊 上传耗时估算\n"
-            f"- 文件名: {file_name}\n"
-            f"- 文件大小: {self._format_bytes(file_size_bytes)}\n"
-            f"- 文本占比: {text_ratio}（{ext} 类型）\n"
-            f"- 预估字符数: {estimated_chars:,}\n"
-            f"- 切片数: ~{estimated_chunks}\n"
-            f"- 平均嵌入耗时: {self._avg_embedding_time}s/切片\n"
-            f"- 预估总耗时: ~{self._format_duration(estimated_seconds)}\n"
-            f"- 建议策略: {strategy}\n"
-            f"- 推荐轮询间隔: {polling_str}（用于 future_task 的 run_at 间隔）"
-        )
+        return _json.dumps({
+            "s": True,
+            "d": {
+                "file_name": file_name,
+                "ext": ext,
+                "file_size_bytes": file_size_bytes,
+                "text_ratio": text_ratio,
+                "estimated_chars": int(estimated_chars),
+                "estimated_chunks": estimated_chunks,
+                "avg_embedding_time": self._avg_embedding_time,
+                "estimated_seconds": int(estimated_seconds),
+                "strategy": strategy,
+                "strategy_label": {
+                    "empty": "文件为空",
+                    "sync_fast": "极快（< 30s）",
+                    "sync": "较快（30-100s）",
+                    "async": "可能超时（> 100s）",
+                }.get(strategy, ""),
+                "polling_interval_seconds": polling_interval,
+            },
+            "e": None,
+        })
 
     @staticmethod
     def _format_bytes(n: int) -> str:
@@ -705,6 +822,20 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             m, _ = divmod(r, 60)
             return f"{h}h{m}m"
 
+    async def _has_active_upload_lock(self) -> bool:
+        """查询数据库，检查是否存在活跃的上传检查 cron job（分布式锁）。"""
+        try:
+            cron_mgr = getattr(self.context, "cron_manager", None)
+            if cron_mgr is None:
+                return False
+            jobs = await cron_mgr.db.list_cron_jobs("active_agent")
+            for job in jobs or []:
+                if job.name and job.name.startswith("upload_check_") and job.enabled:
+                    return True
+        except Exception:
+            pass
+        return False
+
     # ── Tool 4: Create knowledge base ─────────────────────────────
 
     @llm_tool(name="astr_kb_create")
@@ -720,7 +851,27 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
     ) -> str:
         """创建一个新的知识库。
 
-        Create a new knowledge base with the specified parameters.
+        Create a new knowledge base.
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // created kb
+                    "kb_id": string,
+                    "kb_name": string,
+                    "embedding_provider": string | null,
+                    "rerank_provider": string | null,
+                    "chunk_size": number,
+                    "chunk_overlap": number
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
             kb_name(string): 知识库名称
@@ -730,55 +881,23 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             chunk_size(number): 分块大小（字符数），默认 512
             chunk_overlap(number): 分块重叠（字符数），默认 50
         """
-        # ── 解析 embedding provider ─────────────────────────────
         embedding_providers = self.context.get_all_embedding_providers()
         if not embedding_providers:
-            return (
-                "❌ 创建失败\n"
-                "- 错误: 没有可用的 Embedding 模型提供商。\n"
-                "请先在 Dashboard 中配置 Embedding 模型。"
-            )
+            return _json.dumps({"s": False, "d": None, "e": "没有可用的 Embedding 模型提供商。"})
 
-        emb_id = self._match_provider(
-            embedding_providers, embedding_provider,
-            "Embedding",
-        )
+        emb_id = self._match_provider(embedding_providers, embedding_provider, "Embedding")
         if not emb_id:
-            candidates = "\n".join(
-                f"  - {p.meta().id}" for p in embedding_providers
-            )
-            return (
-                "⚠️ 未找到匹配的 Embedding 提供商。\n"
-                f"可用的 Embedding 提供商:\n{candidates}\n"
-                "请提供上述列表中的完整 ID。"
-            )
+            return _json.dumps({"s": False, "d": None, "e": f"未找到匹配的 Embedding 提供商: {embedding_provider}"})
 
-        # ── 解析 rerank provider（可选）─────────────────────────
         rerank_id = None
         if rerank_provider.strip():
-            rerank_providers = getattr(
-                self.context.provider_manager, "rerank_provider_insts", []
-            )
+            rerank_providers = getattr(self.context.provider_manager, "rerank_provider_insts", [])
             if not rerank_providers:
-                return (
-                    "❌ 创建失败\n"
-                    "- 错误: 未配置 Rerank 模型提供商，但指定了 rerank_provider。\n"
-                    "请先在 Dashboard 中配置 Rerank 模型，或留空 rerank_provider。"
-                )
-            rerank_id = self._match_provider(
-                rerank_providers, rerank_provider, "Rerank",
-            )
+                return _json.dumps({"s": False, "d": None, "e": "未配置 Rerank 模型提供商。"})
+            rerank_id = self._match_provider(rerank_providers, rerank_provider, "Rerank")
             if not rerank_id:
-                candidates = "\n".join(
-                    f"  - {p.meta().id}" for p in rerank_providers
-                )
-                return (
-                    "⚠️ 未找到匹配的 Rerank 提供商。\n"
-                    f"可用的 Rerank 提供商:\n{candidates}\n"
-                    "请提供上述列表中的完整 ID。"
-                )
+                return _json.dumps({"s": False, "d": None, "e": f"未找到匹配的 Rerank 提供商: {rerank_provider}"})
 
-        # ── 创建知识库 ──────────────────────────────────────────
         try:
             kb_helper = await self.context.kb_manager.create_kb(
                 kb_name=kb_name,
@@ -789,28 +908,26 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 chunk_overlap=chunk_overlap,
             )
         except Exception as e:
-            return (
-                f"❌ 创建失败\n"
-                f"- 知识库名称: {kb_name}\n"
-                f"- 错误: {e!s}"
-            )
+            return _json.dumps({"s": False, "d": None, "e": f"创建失败: {e!s}"})
 
         kb = kb_helper.kb
 
-        # 自动加入白名单
         if self.access_control.auto_whitelist_created:
             self.access_control.add_to_whitelist(kb.kb_id)
             self._persist_config()
 
-        parts = [f"✅ 知识库创建成功"]
-        parts.append(f"- 名称: {kb.kb_name}")
-        parts.append(f"- ID: {kb.kb_id}")
-        parts.append(f"- Embedding: {emb_id}")
-        if rerank_id:
-            parts.append(f"- Rerank: {rerank_id}")
-        parts.append(f"- 分块大小: {kb.chunk_size}")
-        parts.append(f"- 分块重叠: {kb.chunk_overlap}")
-        return "\n".join(parts)
+        return _json.dumps({
+            "s": True,
+            "d": {
+                "kb_id": kb.kb_id,
+                "kb_name": kb.kb_name,
+                "embedding_provider": emb_id,
+                "rerank_provider": rerank_id,
+                "chunk_size": kb.chunk_size,
+                "chunk_overlap": kb.chunk_overlap,
+            },
+            "e": None,
+        })
 
     # ── Provider fuzzy matching helper ─────────────────────────
 
@@ -868,42 +985,53 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         Delete a knowledge base and all its documents and vector data.
 
-        注意：此操作不可撤销！除非用户明确要求跳过确认，否则必须要求用户确认后再执行。
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // deleted
+                    "kb_id": string,
+                    "kb_name": string,
+                    "removed_from_whitelist": boolean
+                },
+                "e": null
+            } | {
+                "s": true,
+                "d": { // confirmation required
+                    "confirm_required": true,
+                    "kb_id": string
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
             kb_id(string): 要删除的知识库ID
             confirm(bool): 是否确认执行删除。默认为 false，设为 true 时执行。
         """
-        # 确认检查
         if not confirm:
-            return (
-                "⚠️ 确认请求\n"
-                f"- 操作: 删除知识库\n"
-                f"- ID: {kb_id}\n"
-                f"- 警告: 此操作将永久删除该知识库及其所有文档和向量数据，不可撤销。\n"
-                f"请回复确认，或再次调用时将 confirm 设为 true。"
-            )
+            return _json.dumps({"s": True, "d": {"confirm_required": True, "kb_id": kb_id}, "e": None})
 
-        # 权限检查
         try:
             self.access_control.check_kb_access(kb_id)
         except PermissionError as e:
-            return f"❌ 权限不足: {e}"
+            return _json.dumps({"s": False, "d": None, "e": f"权限不足: {e}"})
 
-        # 获取知识库信息（用于返回提示）
         kb_helper = await self.context.kb_manager.get_kb(kb_id)
         kb_name = kb_helper.kb.kb_name if kb_helper else kb_id
 
-        # 执行删除
         try:
             success = await self.context.kb_manager.delete_kb(kb_id)
         except Exception as e:
-            return f"❌ 删除失败\n- 知识库: {kb_name}\n- 错误: {e!s}"
+            return _json.dumps({"s": False, "d": None, "e": f"删除失败: {e!s}"})
 
         if not success:
-            return f"❌ 删除失败\n- 知识库: {kb_name}\n- 原因: 知识库不存在或未加载。"
+            return _json.dumps({"s": False, "d": None, "e": "知识库不存在或未加载。"})
 
-        # 清理白名单/黑名单中的孤儿条目
         removed_wl = kb_id in self.access_control.whitelist
         removed_bl = kb_id in self.access_control.blacklist
         self.access_control.whitelist.discard(kb_id)
@@ -911,13 +1039,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         if removed_wl or removed_bl:
             self._persist_config()
 
-        return (
-            f"✅ 知识库已删除\n"
-            f"- 名称: {kb_name}\n"
-            f"- ID: {kb_id}\n"
-            f"{'- 已从白名单中移除' if removed_wl else ''}"
-            f"{'- 已从黑名单中移除' if removed_bl else ''}"
-        )
+        return _json.dumps({
+            "s": True,
+            "d": {"kb_id": kb_id, "kb_name": kb_name, "removed_from_whitelist": removed_wl or removed_bl},
+            "e": None,
+        })
 
     # ── Tool 5: Delete document from knowledge base ───────────────
 
@@ -934,8 +1060,36 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         Delete a document from a knowledge base.
 
-        注意：此操作不可撤销！除非用户明确要求跳过确认，否则必须要求用户确认后再执行。
-        可通过 doc_id 或 file_name 指定要删除的文档，至少需要提供其中一个。
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // deleted
+                    "doc_id": string,
+                    "file_name": string
+                },
+                "e": null
+            } | {
+                "s": true,
+                "d": { // confirmation required
+                    "confirm_required": true,
+                    "doc_id": string,
+                    "file_name": string
+                },
+                "e": null
+            } | {
+                "s": true,
+                "d": { // multiple matches
+                    "multiple_matches": true,
+                    "matches": { "doc_id": string, "file_name": string }[]
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
 
         Args:
             kb_id(string): 知识库ID
@@ -944,65 +1098,55 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             confirm(bool): 是否确认执行删除。默认为 false。
         """
         if not doc_id and not file_name:
-            return "❌ 参数错误: 请提供 doc_id 或 file_name。"
+            return _json.dumps({"s": False, "d": None, "e": "请提供 doc_id 或 file_name。"})
 
-        # 权限检查
         try:
             self.access_control.check_kb_access(kb_id)
         except PermissionError as e:
-            return f"❌ 权限不足: {e}"
+            return _json.dumps({"s": False, "d": None, "e": f"权限不足: {e}"})
 
-        # 获取知识库
         kb_helper = await self.context.kb_manager.get_kb(kb_id)
         if not kb_helper:
-            return f"❌ 错误: 知识库 {kb_id} 不存在或未加载。"
+            return _json.dumps({"s": False, "d": None, "e": f"知识库 {kb_id} 不存在。"})
 
-        # 查找目标文档
         target_doc = None
         if doc_id:
             target_doc = await kb_helper.get_document(doc_id)
             if not target_doc:
-                return f"❌ 未找到文档: doc_id={doc_id}"
+                return _json.dumps({"s": False, "d": None, "e": f"未找到文档: doc_id={doc_id}"})
         elif file_name:
             docs = await kb_helper.list_documents(limit=500)
             matches = [d for d in docs if file_name.lower() in d.doc_name.lower()]
             if not matches:
-                return f"❌ 未找到文件名包含 '{file_name}' 的文档。"
+                return _json.dumps({"s": False, "d": None, "e": f"未找到文件名包含 '{file_name}' 的文档。"})
             if len(matches) > 1:
-                lines = [f"⚠️ 找到多个匹配的文档，请通过 doc_id 指定："]
-                for d in matches:
-                    lines.append(f"  - doc_id: {d.doc_id} | 文件名: {d.doc_name}")
-                return "\n".join(lines)
+                return _json.dumps({
+                    "s": True,
+                    "d": {
+                        "multiple_matches": True,
+                        "matches": [{"doc_id": d.doc_id, "file_name": d.doc_name} for d in matches],
+                    },
+                    "e": None,
+                })
             target_doc = matches[0]
 
-        # 确认检查
         if not confirm:
-            return (
-                "⚠️ 确认请求\n"
-                f"- 操作: 删除文档\n"
-                f"- 知识库: {kb_id}\n"
-                f"- 文档: {target_doc.doc_name} ({target_doc.doc_id})\n"
-                f"- 警告: 此操作将永久删除该文档及其向量数据，不可撤销。\n"
-                f"请回复确认，或再次调用时将 confirm 设为 true。"
-            )
+            return _json.dumps({
+                "s": True,
+                "d": {"confirm_required": True, "doc_id": target_doc.doc_id, "file_name": target_doc.doc_name},
+                "e": None,
+            })
 
-        # 执行删除
         try:
             await kb_helper.delete_document(target_doc.doc_id)
         except Exception as e:
-            return (
-                f"❌ 删除失败\n"
-                f"- 知识库: {kb_id}\n"
-                f"- 文档: {target_doc.doc_name}\n"
-                f"- 错误: {e!s}"
-            )
+            return _json.dumps({"s": False, "d": None, "e": f"删除失败: {e!s}"})
 
-        return (
-            f"✅ 文档已删除\n"
-            f"- 知识库: {kb_id}\n"
-            f"- 文档: {target_doc.doc_name}\n"
-            f"- 文档ID: {target_doc.doc_id}"
-        )
+        return _json.dumps({
+            "s": True,
+            "d": {"doc_id": target_doc.doc_id, "file_name": target_doc.doc_name},
+            "e": None,
+        })
 
     # ── Tool 6: Search knowledge bases (access-controlled) ────────
 
@@ -1016,18 +1160,33 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         Search knowledge bases allowed by the plugin's access control.
 
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // search results
+                    "results": string | null, // context text or null if no results
+                    "kb_count": number
+                },
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
+
         Args:
             query(string): 搜索关键词或问题
         """
         if not query.strip():
-            return "❌ 请输入搜索关键词。"
+            return _json.dumps({"s": False, "d": None, "e": "请输入搜索关键词。"})
 
-        # 获取所有知识库并按访问控制过滤
         all_kbs = await self.context.kb_manager.list_kbs()
         allowed_kbs = self.access_control.filter_kb_list(all_kbs)
 
         if not allowed_kbs:
-            return "当前没有可搜索的知识库。"
+            return _json.dumps({"s": True, "d": {"results": None, "kb_count": 0}, "e": None})
 
         kb_names = [kb.kb_name for kb in allowed_kbs]
 
@@ -1039,12 +1198,140 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 top_m_final=5,
             )
         except Exception as e:
-            return f"❌ 搜索失败: {e!s}"
+            return _json.dumps({"s": False, "d": None, "e": f"搜索失败: {e!s}"})
 
         if not result or not result.get("context_text"):
-            return "未找到相关知识。"
+            return _json.dumps({"s": True, "d": {"results": None, "kb_count": len(kb_names)}, "e": None})
 
-        return result["context_text"]
+        return _json.dumps({"s": True, "d": {"results": result["context_text"], "kb_count": len(kb_names)}, "e": None})
+
+    # ── Tool 7: List documents in a knowledge base ────────────────
+
+    @llm_tool(name="astr_kb_list_documents")
+    async def list_documents_in_kb(
+        self,
+        event: AstrMessageEvent,
+        kb_id: str,
+    ) -> str:
+        """列出指定知识库中的所有文档。
+
+        List all documents in a knowledge base.
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "d": { // list of documents
+                    "doc_id": string,
+                    "file_name": string,
+                    "file_type": string,
+                    "file_size": number,
+                    "chunk_count": number
+                }[],
+                "e": null
+            } | {
+                "s": false,
+                "d": null,
+                "e": string
+            }
+            ```
+
+        Args:
+            kb_id(string): 知识库 ID（从 astr_kb_list 获得）
+        """
+        try:
+            self.access_control.check_kb_access(kb_id)
+        except PermissionError as e:
+            return _json.dumps({"s": False, "d": None, "e": f"权限不足: {e}"})
+
+        kb_helper = await self.context.kb_manager.get_kb(kb_id)
+        if not kb_helper:
+            return _json.dumps({"s": False, "d": None, "e": f"知识库 {kb_id} 不存在。"})
+
+        try:
+            docs = await kb_helper.list_documents(limit=500)
+        except Exception as e:
+            return _json.dumps({"s": False, "d": None, "e": f"查询失败: {e!s}"})
+
+        data = [
+            {
+                "doc_id": doc.doc_id,
+                "file_name": doc.doc_name,
+                "file_type": doc.file_type,
+                "file_size": doc.file_size,
+                "chunk_count": doc.chunk_count,
+            }
+            for doc in (docs or [])
+        ]
+        return _json.dumps({"s": True, "d": data, "e": None})
+
+    # ── Tool 8: Get a single chunk from a document ────────────────
+
+    @llm_tool(name="astr_kb_get_document_content_chunk")
+    async def get_document_content_chunk(
+        self,
+        event: AstrMessageEvent,
+        kb_id: str,
+        doc_id: str,
+        chunk_index: int = 0,
+    ) -> str:
+        """获取知识库中指定文档的指定文本分块。
+
+        Get one text chunk from a document by its index.
+        一次只返回一个分块，无截断限制。
+
+        Return schema (JSON):
+            ```typescript
+            type Return = {
+                "s": true, // is success
+                "c": string, // chunk text content
+                "e": null
+            } | {
+                "s": false, // error
+                "c": null,
+                "e": string // error message
+            }
+            ```
+
+        Args:
+            kb_id(string): 知识库 ID
+            doc_id(string): 文档 ID（从 astr_kb_list_documents 获得）
+            chunk_index(number): 分块序号（从 0 开始），默认 0
+        """
+        try:
+            self.access_control.check_kb_access(kb_id)
+        except PermissionError as e:
+            return _json.dumps({"s": False, "c": None, "e": f"权限不足: {e}"})
+
+        kb_helper = await self.context.kb_manager.get_kb(kb_id)
+        if not kb_helper:
+            return _json.dumps({"s": False, "c": None, "e": f"知识库 {kb_id} 不存在。"})
+
+        try:
+            doc = await kb_helper.get_document(doc_id)
+        except Exception as e:
+            return _json.dumps({"s": False, "c": None, "e": f"查询文档失败: {e}"})
+
+        if not doc:
+            return _json.dumps({"s": False, "c": None, "e": f"未找到文档: doc_id={doc_id}"})
+
+        try:
+            chunks = await kb_helper.get_chunks_by_doc_id(doc_id, limit=9999)
+        except Exception as e:
+            return _json.dumps({"s": False, "c": None, "e": f"读取文档失败: {e}"})
+
+        if not chunks:
+            return _json.dumps({"s": False, "c": None, "e": "该文档没有文本分块。"})
+
+        chunks.sort(key=lambda c: c["chunk_index"])
+
+        if chunk_index < 0 or chunk_index >= len(chunks):
+            return _json.dumps({
+                "s": False, "c": None,
+                "e": f"chunk_index {chunk_index} 越界，有效范围 0-{len(chunks) - 1}",
+            })
+
+        return _json.dumps({"s": True, "c": chunks[chunk_index]["content"], "e": None})
 
     # ── Config persistence helper ─────────────────────────────────
 
