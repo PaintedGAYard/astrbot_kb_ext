@@ -724,12 +724,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             },
             "e": None,
         })
-            f"- 轮询间隔: {self._format_duration(interval)}\n"
-            f"- 预计首次触发: {first_run.isoformat()}\n"
-            f"- 删除指令: 上传完成后，调用 future_task(action=\"delete\", job_id=\"{job.job_id}\")"
-            f" 停止此重复任务，然后继续处理下一个文件。\n"
-            f"⏰ AstrBot 将每 {self._format_duration(interval)} 自动唤醒并检查。"
-        )
 
     # ── Tool 3e: Estimate upload time ─────────────────────────────
 
