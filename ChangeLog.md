@@ -24,6 +24,31 @@ SOFTWARE.
 
 # AstrBot Knowledge Base Extended Access — ChangeLog
 
+## v0.7.0 (2026-06-12)
+
+### 新增
+
+- 独立 xlsx→markdown 文本化引擎：使用 openpyxl 自行构建 Markdown 表格，
+  完全绕过 AstrBot 内置的 pandas.to_html() 产生的 NaN 问题
+- `KnowledgeBaseUploader._extract_markdown()` / `_xlsx_to_markdown()` —
+  格式无关的文本提取框架，当前支持 xlsx，预留扩展点
+- MIT License（`Copyright (c) 2026 Mingxi "Lucien" Du`），全量源码/提示文件头部
+
+### 变更
+
+- 全名改为 **AstrBot Knowledge Base Extended Access**（原名 KB External Access）
+- 项目结构扁平化：插件文件直接从 `src/` 加载，移除嵌套的 `src/astrbot_kb_ext_access/`
+- `build.ps1` 增加 `-Exclude "__pycache__"`，构建产物不再包含缓存目录
+- 估算算法回退：xlsx `text_ratio` 从 2.0 恢复为 0.1（NaN 问题已通过预处理解决）
+- 估算精度说明更新：反映新的 xlsx→markdown 预处理策略
+
+### 修复
+
+- 修复 `upload_bytes()` 缺少 `return await self._upload_with_retry()` 调用，
+  sandbox_path 模式上传实际未生效的 bug
+
+---
+
 ## v0.6.2 (2026-06-11)
 
 ### 变更

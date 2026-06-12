@@ -766,6 +766,12 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             file_name(string): 文件名（含扩展名），用于推断文件类型
             chunk_size(number): 分块大小，默认 512
             chunk_overlap(number): 分块重叠，默认 50
+
+        ⚠️ 精度说明：
+        - XLSX 文件在估算时按压缩比 0.1 计算，实际文本量取决于数据密度。
+          插件已内置 xlsx→markdown 预处理绕过 NaN 问题，
+          但 pandas 的 used_range 仍可能包含大量空白行列。
+        - 若 xlsx 同步上传超时，请切换异步模式。
         """
         ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
         text_ratio_map = {

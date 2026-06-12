@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import os
 import tempfile
 import time
@@ -118,6 +119,10 @@ class KnowledgeBaseUploader:
             if "." in file_name else "txt"
         )
         raw_bytes = base64.b64decode(file_content) if binary else file_content.encode("utf-8")
+        md = self._extract_markdown(raw_bytes, file_name)
+        if md is not None:
+            raw_bytes = md.encode("utf-8")
+            file_type = "md"
         return await self._upload_with_retry(file_name, file_type, raw_bytes, chunk_size, chunk_overlap, timeout, max_retries, wait_completion, upload_task_id)
 
     async def upload_bytes(
@@ -142,6 +147,16 @@ class KnowledgeBaseUploader:
             file_name.rsplit(".", 1)[-1].lower()
             if "." in file_name else "txt"
         )
+        md = self._extract_markdown(raw_bytes, file_name)
+        if md is not None:
+            raw_bytes = md.encode("utf-8")
+            file_type = "md"
+        return await self._upload_with_retry(
+            file_name, file_type, raw_bytes,
+            chunk_size, chunk_overlap,
+            timeout, max_retries, wait_completion, upload_task_id,
+        )
+
     async def get_pending_result(self, key: str) -> dict[str, Any] | None:
         """获取后台上传任务的完成结果（非阻塞）。key 是 upload_task_id 或 file_name。"""
         return self._pending_store.pop(key, None)
@@ -309,3 +324,59 @@ class KnowledgeBaseUploader:
         finally:
             if os.path.exists(tmp.name):
                 os.unlink(tmp.name)
+
+    @staticmethod
+    def _extract_markdown(raw_bytes: bytes, file_name: str) -> str | None:
+        """将支持的格式提取为干净 Markdown 文本，绕过 AstrBot 内置文本化逻辑。
+
+        返回 None 表示不需要自定义提取（AstrBot 原生支持良好）。
+        """
+        ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        if ext == "xlsx":
+            return KnowledgeBaseUploader._xlsx_to_markdown(raw_bytes)
+        # 未来可在此处添加更多格式：doc, ppt 等
+        return None
+
+    @staticmethod
+    def _xlsx_to_markdown(raw_bytes: bytes) -> str:
+        """将 .xlsx 转换为干净的 Markdown 表格，每工作表一个 section。
+
+        使用 openpyxl 直接读取单元格值，自行构建 Markdown 表格，
+        完全绕过 pandas.to_html() 的 NaN 问题。
+        """
+        import openpyxl
+
+        wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True)
+        parts: list[str] = []
+
+        for ws in wb.worksheets:
+            rows_data: list[list[str]] = []
+            for row in ws.iter_rows(values_only=True):
+                # 跳过全空行
+                cleaned = [
+                    str(c).strip() if c is not None else ""
+                    for c in row
+                ]
+                if all(v == "" for v in cleaned):
+                    continue
+                rows_data.append(cleaned)
+
+            if not rows_data:
+                continue
+
+            parts.append(f"## {ws.title}\n")
+
+            # 表头
+            parts.append("| " + " | ".join(rows_data[0]) + " |")
+            parts.append("| " + " | ".join("---" for _ in rows_data[0]) + " |")
+
+            # 数据行
+            for row in rows_data[1:]:
+                # 补齐短行
+                while len(row) < len(rows_data[0]):
+                    row.append("")
+                parts.append("| " + " | ".join(row) + " |")
+
+            parts.append("")
+
+        return "\n".join(parts)
