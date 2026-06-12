@@ -18,9 +18,6 @@ Thumbs.db
 *.swp
 *.swo
 
-# Design docs (regenerated from source)
-design/
-
 # Old plugin extraction artifacts
 astrbot_kb_ext_access_*/
 *.zip
