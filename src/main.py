@@ -41,11 +41,29 @@ from astrbot.api import star, llm_tool
 from astrbot.api.event import AstrMessageEvent
 
 from .access_control import KbAccessControl
-from .kb_uploader import KnowledgeBaseUploader
+from .kb_uploader import KnowledgeBaseUploader, UploadResult
 
 import datetime
+import functools
 import json as _json
 import uuid
+
+
+# ── Shared tool error handler ────────────────────────────────────
+
+
+def tool_error_handler(func):
+    """Decorator for @llm_tool methods that translates exceptions to structured JSON."""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except PermissionError as e:
+            return _json.dumps({"s": False, "d": None, "e": f"权限不足: {e}"})
+        except Exception as e:
+            logger.error(f"Tool {func.__name__} failed: {e}")
+            return _json.dumps({"s": False, "d": None, "e": str(e)})
+    return wrapper
 
 
 class AstrBotKnowledgeBaseExtAccess(star.Star):
@@ -109,8 +127,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             methods=["POST"],
             desc="保存访问控制配置",
         )
-
-    # ── Plugin page web APIs ──────────────────────────────────────
 
     async def _api_kb_list(self):
         """返回所有知识库列表供插件页面渲染。"""
@@ -203,8 +219,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         except Exception as e:
             logger.warning("astrbot_kb_ext_access: failed to load config file — %s", e)
 
-    # ── Tool 1: List knowledge bases ──────────────────────────────
-
     @llm_tool(name="astr_kb_list")
     async def list_knowledge_bases(
         self,
@@ -260,8 +274,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         ]
         return _json.dumps({"s": True, "d": data, "e": None})
 
-    # ── Tool 2: Upload file to knowledge base ─────────────────────
-
     @llm_tool(name="astr_kb_upload")
     async def upload_to_knowledge_base(
         self,
@@ -277,9 +289,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         max_retries: int = 3,
         wait_completion: bool = True,
     ) -> str:
-        """向指定的 AstrBot 知识库上传文件。
-
-        Upload file content to a specified knowledge base.
+        """Upload file content to a specified knowledge base.
 
         Return schema (JSON):
             ```typescript
@@ -308,38 +318,13 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 "e": string
             }
             ```
-
-        Args:
-            kb_id(string): 目标知识库ID
-            file_name(string): 文件名（含扩展名）
-            file_content(string): 文本内容或 base64 编码的原始数据（sandbox_path 为空时使用）
-            binary(bool): file_content 是否为 base64 编码（仅 file_content 模式有效）
-            sandbox_path(string): 沙箱中的文件路径（优先使用，无需 base64 转码）
-            chunk_size(number): 分块大小（字符数），默认 512
-            chunk_overlap(number): 分块重叠（字符数），默认 50
-            timeout(number): 单次同步尝试的超时秒数，默认 100。
-                如果同步上传超时，说明该文件不适合同步模式。
-                ⚠️ 不要增大 timeout——超时说明文件太大，即使加到 120s 也可能失败。
-                正确做法: 改用 wait_completion=false 异步上传 + future_task 轮询。
-            max_retries(number): 失败重试次数，默认 3。设为 0 不重试。
-            wait_completion(bool): 是否等待向量化完成。默认 True。
-                设为 False 进入异步模式: 文件提交到后台处理后立即返回，
-                不等待向量化。适用于同步上传超时的文件。
-                提交后必须使用 future_task 安排轮询检查，不得主动轮询。
-                ⚠️ 并发限制: 同一时间只允许一个 wait_completion=false 上传。
-                若有其他异步上传进行中，工具会拒绝。
         """
-        try:
-            self.access_control.check_kb_access(kb_id)
-        except PermissionError as e:
-            return _json.dumps({"s": False, "d": None, "e": f"权限不足: {e}"})
-
+        self.access_control.check_kb_access(kb_id)
         kb_helper = await self.context.kb_manager.get_kb(kb_id)
         if not kb_helper:
             return _json.dumps({"s": False, "d": None, "e": f"知识库 {kb_id} 不存在。"})
 
         if not wait_completion:
-            # 数据库级分布式锁：检查是否有活跃的上传检查 cron job
             if await self._has_active_upload_lock():
                 return _json.dumps({"s": False, "d": None, "e": "已有异步上传进行中（存在活跃的 upload_check cron job）"})
             upload_task_id = str(uuid.uuid4())
@@ -357,24 +342,9 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         )
 
         if sandbox_path:
-            try:
-                from astrbot.core.computer.computer_client import get_booter
-                import base64
-                sb = await get_booter(self.context, event.unified_msg_origin)
-                py_code = (
-                    "import base64\n"
-                    f"with open({sandbox_path!r}, 'rb') as f:\n"
-                    "    print(base64.b64encode(f.read()).decode())\n"
-                )
-                py_result = await sb.python.exec(py_code, timeout=60)
-                if not py_result.get("success", True):
-                    return _json.dumps({"s": False, "d": None, "e": f"沙箱读取文件失败: {py_result.get('error', 'unknown')}"})
-                b64_data = (py_result.get("output", "") or "").strip()
-                if not b64_data:
-                    return _json.dumps({"s": False, "d": None, "e": "沙箱返回空数据"})
-                raw_bytes = base64.b64decode(b64_data)
-            except Exception as e:
-                return _json.dumps({"s": False, "d": None, "e": f"无法从沙箱读取文件: {e!s}"})
+            raw_bytes = await self._read_sandbox_file(event, sandbox_path)
+            if raw_bytes is None:
+                return _json.dumps({"s": False, "d": None, "e": "无法从沙箱读取文件"})
             result = await uploader.upload_bytes(
                 file_name=file_name, raw_bytes=raw_bytes,
                 chunk_size=chunk_size, chunk_overlap=chunk_overlap,
@@ -391,13 +361,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 upload_task_id=upload_task_id,
             )
 
-        if result.get("pending"):
+        if result.pending:
             return _json.dumps({"s": True, "d": {"pending": True, "upload_task_id": upload_task_id, "file_name": file_name, "kb_id": kb_id}, "e": None})
-        if result.get("success"):
-            return _json.dumps({"s": True, "d": {"result_text": result["result"]}, "e": None})
-        return _json.dumps({"s": False, "d": None, "e": result.get("result", "上传失败")})
-
-    # ── Tool 3b: Batch upload files ───────────────────────────────
+        if result.success:
+            return _json.dumps({"s": True, "d": {"pending": False, "doc_id": result.doc_id, "file_name": file_name, "chunk_count": result.chunk_count, "kb_id": kb_id}, "e": None})
+        return _json.dumps({"s": False, "d": None, "e": result.error or "上传失败"})
 
     @llm_tool(name="astr_kb_upload_batch")
     async def upload_to_knowledge_base_batch(
@@ -492,20 +460,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
             try:
                 if sandbox_path:
-                    from astrbot.core.computer.computer_client import get_booter
-                    import base64 as b64
-                    sb = await get_booter(self.context, event.unified_msg_origin)
-                    py_code = (
-                        "import base64\n"
-                        f"with open({sandbox_path!r}, 'rb') as f:\n"
-                        "    print(base64.b64encode(f.read()).decode())\n"
-                    )
-                    py_result = await sb.python.exec(py_code, timeout=60)
-                    if not py_result.get("success", True):
+                    raw = await self._read_sandbox_file(event, sandbox_path)
+                    if raw is None:
                         item_results.append({"i": i, "file_name": file_name, "ok": False, "e": "沙箱读取失败"})
                         fail_count += 1
                         continue
-                    raw = b64.b64decode((py_result.get("output", "") or "").strip())
                     r = await uploader.upload_bytes(
                         file_name=file_name, raw_bytes=raw,
                         chunk_size=chunk_size, chunk_overlap=chunk_overlap,
@@ -524,12 +483,12 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 fail_count += 1
                 continue
 
-            if r.get("success"):
+            if r.success:
                 success_count += 1
                 item_results.append({"i": i, "file_name": file_name, "ok": True, "e": None})
             else:
                 fail_count += 1
-                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": r.get("result", "上传失败")})
+                item_results.append({"i": i, "file_name": file_name, "ok": False, "e": r.error or "上传失败"})
 
         return _json.dumps({
             "s": True,
@@ -541,8 +500,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             },
             "e": None,
         })
-
-    # ── Tool 3c: Check pending upload status ──────────────────────
 
     @llm_tool(name="astr_kb_check_upload")
     async def check_upload_status(
@@ -639,8 +596,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         return _json.dumps({"s": False, "d": None, "e": "请提供 upload_task_id，或 file_name + kb_id。"})
 
-    # ── Tool 3d: Schedule FutureTask check (server-side time) ────
-
     @llm_tool(name="astr_kb_schedule_check")
     async def schedule_upload_check(
         self,
@@ -724,8 +679,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             },
             "e": None,
         })
-
-    # ── Tool 3e: Estimate upload time ─────────────────────────────
 
     @llm_tool(name="astr_kb_estimate_upload_time")
     async def estimate_upload_time(
@@ -857,8 +810,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         except Exception:
             pass
         return False
-
-    # ── Tool 4: Create knowledge base ─────────────────────────────
 
     @llm_tool(name="astr_kb_create")
     async def create_knowledge_base(
@@ -994,8 +945,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         return None
 
-    # ── Tool 4: Delete knowledge base ─────────────────────────────
-
     @llm_tool(name="astr_kb_delete")
     async def delete_knowledge_base(
         self,
@@ -1066,8 +1015,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             "d": {"kb_id": kb_id, "kb_name": kb_name, "removed_from_whitelist": removed_wl or removed_bl},
             "e": None,
         })
-
-    # ── Tool 5: Delete document from knowledge base ───────────────
 
     @llm_tool(name="astr_kb_delete_document")
     async def delete_document(
@@ -1170,8 +1117,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             "e": None,
         })
 
-    # ── Tool 6: Search knowledge bases (access-controlled) ────────
-
     @llm_tool(name="astr_kb_search_ext")
     async def search_knowledge_base(
         self,
@@ -1226,8 +1171,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             return _json.dumps({"s": True, "d": {"results": None, "kb_count": len(kb_names)}, "e": None})
 
         return _json.dumps({"s": True, "d": {"results": result["context_text"], "kb_count": len(kb_names)}, "e": None})
-
-    # ── Tool 7: List documents in a knowledge base ────────────────
 
     @llm_tool(name="astr_kb_list_documents")
     async def list_documents_in_kb(
@@ -1286,8 +1229,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             for doc in (docs or [])
         ]
         return _json.dumps({"s": True, "d": data, "e": None})
-
-    # ── Tool 8: Get a single chunk from a document ────────────────
 
     @llm_tool(name="astr_kb_get_document_content_chunk")
     async def get_document_content_chunk(
@@ -1354,8 +1295,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             })
 
         return _json.dumps({"s": True, "c": chunks[chunk_index]["content"], "e": None})
-
-    # ── Config persistence helper ─────────────────────────────────
 
     def _persist_config(self) -> None:
         """将当前访问控制配置持久化到 JSON 文件。"""

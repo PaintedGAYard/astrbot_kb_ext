@@ -20,24 +20,19 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Knowledge base access controller — whitelist/blacklist mechanism."""
+"""Knowledge base access controller — whitelist/blacklist mechanism.
+
+判定逻辑（由高到低）:
+1. kb_id 在黑名单中 → 拒绝
+2. whitelist 模式且 kb_id 不在白名单中 → 拒绝
+3. 其他情况 → 允许
+
+配置项存储的是 kb_id。插件页面保存时直接写入 ID，保留 resolve_names() 兼容旧配置中的名称。
+"""
 
 
 class KbAccessControl:
-    """知识库访问控制器 — 白名单/黑名单机制。
-
-    Knowledge base access controller with whitelist/blacklist support.
-
-    判定逻辑（由高到低）:
-    1. kb_id 在黑名单中 → 拒绝
-    2. whitelist 模式且 kb_id 不在白名单中 → 拒绝
-    3. 其他情况 → 允许
-
-    配置项 whitelist/blacklist 存储的是知识库 ID。
-    插件页面保存时直接写入 ID（而非显示名），
-    所有匹配操作均基于 ID 进行。
-    保留 resolve_names() 方法用于兼容旧配置中的名称。
-    """
+    """Knowledge base access controller with whitelist/blacklist support."""
 
     MODE_WHITELIST = "whitelist"
     MODE_BLACKLIST = "blacklist"
@@ -56,14 +51,11 @@ class KbAccessControl:
             kb_ac.get("auto_whitelist_created", True)
         )
 
-    # ── name→id resolution (backward compatibility) ───────────────
-
     def resolve_names(self, kbs: list) -> None:
-        """将旧配置中的知识库名称解析为 kb_id（兼容旧版）。
-        新版配置直接存储 ID，此方法仅用于迁移旧数据。
+        """Resolve KB names to IDs from a live KB list (backward compatibility for old config).
 
         Args:
-            kbs: KnowledgeBase 对象列表（来自 kb_manager.list_kbs()）。
+            kbs: KnowledgeBase objects from kb_manager.list_kbs().
         """
         # 建立 name→id 映射（首次名称为准，处理撞名）
         name_to_id: dict[str, str] = {}
@@ -86,12 +78,11 @@ class KbAccessControl:
         self.blacklist = _resolve(self._raw_blacklist)
         self._resolved = True
 
-    # ── config validation ─────────────────────────────────────────
-
     def validate_config(self) -> None:
-        """校验配置合法性。
+        """Validate the access control configuration.
 
-        Validate the access control configuration.
+        Raises:
+            ValueError: If mode is not whitelist or blacklist.
         """
         if self.mode not in (self.MODE_WHITELIST, self.MODE_BLACKLIST):
             raise ValueError(
@@ -99,19 +90,15 @@ class KbAccessControl:
                 f"或 '{self.MODE_BLACKLIST}'，当前值: {self.mode!r}"
             )
 
-    # ── access checks (IDs only) ──
-
     def check_kb_access(self, kb_id: str, kbs: list | None = None) -> None:
-        """检查是否允许操作指定知识库。
-
-        Check if the specified knowledge base is accessible.
+        """Check if the specified KB is accessible.
 
         Args:
-            kb_id: 知识库 ID。
-            kbs: 已弃用，保留参数签名兼容。
+            kb_id: The KB ID to check.
+            kbs: Deprecated, kept for signature compatibility.
 
         Raises:
-            PermissionError: 当知识库不在白名单或在黑名单中时。
+            PermissionError: If the KB is blacklisted or not in whitelist.
         """
         if kb_id in self.blacklist:
             raise PermissionError(
@@ -123,15 +110,13 @@ class KbAccessControl:
             )
 
     def filter_kb_list(self, kbs: list) -> list:
-        """过滤知识库列表，仅返回当前配置允许访问的条目。
-
-        Filter a knowledge base list according to the current access control rules.
+        """Filter a KB list according to the current access control rules.
 
         Args:
-            kbs: KnowledgeBase 对象列表（来自 kb_manager.list_kbs()）。
+            kbs: KnowledgeBase objects from kb_manager.list_kbs().
 
         Returns:
-            过滤后的列表。
+            Filtered list.
         """
         return [
             kb for kb in kbs
@@ -141,16 +126,10 @@ class KbAccessControl:
 
     @property
     def auto_whitelist_created(self) -> bool:
-        """是否将新建的知识库自动加入白名单。
-
-        Whether newly created KBs are automatically added to the whitelist.
-        """
+        """Whether newly created KBs are automatically added to the whitelist."""
         return self._auto_whitelist
 
     def add_to_whitelist(self, kb_id: str) -> None:
-        """将知识库 ID 加入白名单（仅 whitelist 模式有效）。
-
-        Add a KB ID to the whitelist. Only effective in whitelist mode.
-        """
+        """Add a KB ID to the whitelist. Only effective in whitelist mode."""
         if self.mode == self.MODE_WHITELIST:
             self.whitelist.add(kb_id)

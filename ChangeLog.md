@@ -24,6 +24,32 @@ SOFTWARE.
 
 # AstrBot Knowledge Base Extended Access — ChangeLog
 
+## v1.0.0b (2026-06-13)
+
+### 重构
+
+- 完整架构重构，严格遵循编码规范：
+  - `UploadParams` / `UploadResult` 数据类取代 9+ 参数的方法签名
+  - `_AsyncUploadTask` 类封装异步上传的 shield/wait/store 模式
+  - `MarkdownExtractor` 独立模块（从 `kb_uploader.py` 提取）
+  - `tool_error_handler` 装饰器统一工具层异常处理
+  - `_read_sandbox_file` 方法消除沙箱读取代码重复
+- 所有内部方法返回 `UploadResult` 数据类（结构化），不再返回 LLM 风格消息
+- 文档注释精简为纯接口契约，移除所有实现细节和冗余注释
+
+### 修复
+
+- 修复批量上传工具调用 `r.get("success")` 访问 `UploadResult` 数据类的运行时崩溃
+
+### 变更
+
+- 以 `metadata.yaml` 为唯一版本源，`__init__.py` 动态读取
+- `.xlsx` / `.xls` / `.doc` 文本化由插件自动处理，对 Agent 透明
+- 构建脚本排除 `__pycache__`
+- SKILL 文件去重，文件格式表仅在 index 保留
+
+---
+
 ## v0.7.0 (2026-06-12)
 
 ### 新增

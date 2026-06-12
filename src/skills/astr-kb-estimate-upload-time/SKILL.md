@@ -48,14 +48,13 @@ Call this BEFORE uploading ANY file. Use the output to decide which upload strat
 | `"async"` | > 100s | MUST use Strategy C (async + FutureTask). |
 
 ## Accuracy warning
-Estimates for compressed formats (XLSX, DOCX, EPUB) can be inaccurate because
-compression ratios vary widely. A file estimated at 52s may actually take 100s+.
+Estimates for compressed formats (XLSX, DOCX, EPUB) vary in accuracy because
+compression ratios and data density differ widely. A file estimated at 52s
+may actually take 100s+.
 
-⚠️ **XLSX 特别注意**：插件已内置 xlsx→markdown 预处理，使用 openpyxl
-自行构建 Markdown 表格，完全绕过 pandas.to_html() 的 NaN 问题。
-但 pandas 的 used_range 仍可能包含大量空白行列，且 text_ratio 按 0.1
-计算（压缩比），实际文本量取决于数据密度。
-**如果 xlsx 同步上传超时，不要增加超时重试，请直接切换到 Strategy C（异步模式）。**
+⚠️ **XLSX** — text_ratio is based on compressed size (0.1); actual text volume
+depends on data density (sparse tables produce more text). If a sync upload
+times out, switch to Strategy C (async) — do NOT increase timeout.
 
 ## Rules
 - You MUST call this before every upload to choose the correct strategy.

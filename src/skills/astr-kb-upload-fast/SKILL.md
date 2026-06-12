@@ -86,20 +86,6 @@ Call `astr_kb_estimate_upload_time` first to confirm the strategy.
 
 ---
 
-
-## Supported file formats (exhaustive)
-| Category | Extensions |
-|----------|-----------|
-| Plain text | `.txt` |
-| Markdown | `.md` `.markdown` `.mkd` `.mdx` |
-| Structured text | `.rst` `.adoc` |
-| PDF | `.pdf` |
-| eBook | `.epub` |
-| Word | `.docx` ONLY — `.doc` is NOT supported |
-| Excel | `.xls` `.xlsx` BOTH supported |
-
-For any other format (e.g. `.doc`, `.ppt`), extract text first and upload as `.md`.
-
 ## Rules
 - Do NOT put files with estimated time > 30s into a batch — they will hit the framework timeout.
 - Do NOT use `wait_completion=false` in this strategy — that is for Strategy C only.
