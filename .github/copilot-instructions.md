@@ -25,8 +25,8 @@ Documentation in source code (docstrings, comments) serves a single purpose: **r
 
 | Threshold | Action |
 |-----------|--------|
-| > 5 parameters | Consider refactoring into a `@dataclass` parameter pack |
-| > 8 parameters | **Must** refactor — use a `@dataclass` or similar |
+| > 3 parameters | Consider refactoring into a `@dataclass` parameter pack |
+| > 5 parameters | **Must** refactor — use a `@dataclass` or similar |
 | > 2 nested control constructs | Extract inner blocks into helper functions or classes |
 | Function contains inner functions | Likely too fat — extract them into a named class |
 
