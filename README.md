@@ -79,7 +79,7 @@ Upload features: configurable `timeout` (per-attempt), `max_retries`, `chunk_siz
 | Structured text | `.rst` `.adoc` |
 | PDF | `.pdf` |
 | eBook | `.epub` |
-| Word | `.docx` `.doc` |
+| Word | `.docx` ONLY — `.doc` is NOT supported |
 | Excel | `.xls` `.xlsx` |
 
 Other formats are not supported. Inform the user of this limitation.

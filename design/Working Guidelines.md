@@ -42,6 +42,19 @@ Given that this is an **LLM** tool project, for conciseness, logical **clarity**
     - Instance-level mutable state (e.g., accumulators, phase trackers) must be documented with thread/coroutine safety considerations.
     - If a method modifies shared state, that is a **side-effect** and must be declared in the interface contract (see item 1.1).
 
+# ChangeLog convention
+
+1. The `ChangeLog.md` should only document **business-logic changes** — changes that
+   affect functionality, user-visible behaviour, or the external contract of the plugin.
+2. **Do NOT** include *bookkeeping* entries such as:
+   - docstring or comment reformatting / translation
+   - code style cleanups that do not alter behaviour
+   - version bumps or build script changes
+   - internal refactoring that has no observable effect on users or LLM agents
+3. If a release contains both business-logic changes and bookkeeping changes,
+   only the business-logic changes should appear in the ChangeLog.  The
+   bookkeeping changes are implicitly part of the release.
+
 # Language Usage Guideline
 
 1. Always use English for source code documentation and inline comments.

@@ -40,6 +40,8 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from astrbot.core.knowledge_base.kb_helper import KBHelper
 
+from astrbot.api import logger
+
 from .markdown_extractor import MarkdownExtractor
 
 
@@ -258,12 +260,20 @@ class KnowledgeBaseUploader:
         Side-effects: when markdown extraction succeeds, p.raw_bytes is replaced
         with the extracted text (encoded as UTF-8) and p.extracted_as_markdown
         is set to True so that _run_upload passes ``file_type="md"`` to AstrBot.
-        The original file name (including extension) is preserved.
+        The original file name has ``.md`` appended (e.g. ``report.xls`` →
+        ``report.xls.md``) so that AstrBot's parser and chunker see the
+        ``.md`` extension and treat the content as Markdown text, while
+        preserving the original format identifier in the file name.
         """
+        logger.info("Uploader._run: extracting %s (%d bytes)", p.file_name, len(p.raw_bytes))
         md = MarkdownExtractor.extract(p.raw_bytes, p.file_name)
         if md is not None:
+            logger.info("Uploader._run: extraction succeeded, %d chars, replacing raw_bytes", len(md))
             p.raw_bytes = md.encode("utf-8")
             p.extracted_as_markdown = True
+            p.file_name = f"{p.file_name}.md"
+        else:
+            logger.warning("Uploader._run: extraction returned None, keeping original raw_bytes")
 
         if not p.wait_completion:
             return await self._upload_async(p)

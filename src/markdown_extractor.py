@@ -32,6 +32,8 @@ from __future__ import annotations
 import io
 import re
 
+from astrbot.api import logger
+
 
 class MarkdownExtractor:
     """Extract clean Markdown text from binary file formats.
@@ -60,12 +62,23 @@ class MarkdownExtractor:
                 (openpyxl, xlrd, olefile) for corrupt or malformed files.
         """
         ext = _get_ext(file_name)
+        logger.info("MarkdownExtractor: dispatching %s (ext=%s)", file_name, ext)
         if ext == "xlsx":
-            return _xlsx_to_markdown(raw_bytes)
+            result = _xlsx_to_markdown(raw_bytes)
+            logger.info("MarkdownExtractor: xlsx result length=%s", len(result) if result else 0)
+            return result
         if ext == "xls":
-            return _xls_to_markdown(raw_bytes)
+            result = _xls_to_markdown(raw_bytes)
+            logger.info("MarkdownExtractor: xls result length=%s", len(result) if result else 0)
+            return result
         if ext == "doc":
-            return _doc_to_markdown(raw_bytes)
+            logger.warning(
+                "MarkdownExtractor: .doc is not supported. "
+                "The old binary .doc format cannot be reliably converted to text "
+                "in the current environment. Use .docx instead."
+            )
+            return None
+        logger.info("MarkdownExtractor: unsupported ext=%s, returning None", ext)
         return None
 
 
@@ -132,87 +145,3 @@ def _xls_to_markdown(raw_bytes: bytes) -> str:
             parts.extend(_build_markdown_table(ws.name, rows))
 
     return "\n".join(parts)
-
-
-def _doc_to_markdown(raw_bytes: bytes) -> str | None:
-    """Extract text from .doc binary format.
-
-    Strategy:
-      1. pywin32 (Word COM) — best result on Windows when Word is installed.
-      2. markitdown (AstrBot dependency) — may handle some .doc variants.
-      3. olefile — raw stream fallback (last resort, often produces garbage).
-    """
-    # ── Method 1: pywin32 / Word COM (Windows only) ──────────────
-    _com_initialized = False
-    _word_app = None
-    _tmp_path: str | None = None
-    try:
-        import pythoncom
-        import win32com.client
-
-        pythoncom.CoInitialize()
-        _com_initialized = True
-
-        word = win32com.client.Dispatch("Word.Application")
-        _word_app = word
-        word.Visible = False
-        word.DisplayAlerts = False
-
-        import os
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as f:
-            _tmp_path = f.name
-            f.write(raw_bytes)
-
-        doc = word.Documents.Open(_tmp_path)
-        text: str = doc.Content.Text
-        doc.Close()
-
-        if text and text.strip():
-            return text.strip()
-    except ImportError:
-        pass  # pywin32 not installed in this environment
-    except Exception:
-        pass
-    finally:
-        import os as _os
-        if _tmp_path and _os.path.exists(_tmp_path):
-            _os.unlink(_tmp_path)
-        if _word_app is not None:
-            try:
-                _word_app.Quit()
-            except Exception:
-                pass
-        if _com_initialized:
-            try:
-                import pythoncom as _pc
-                _pc.CoUninitialize()
-            except Exception:
-                pass
-
-    # ── Method 2: markitdown (AstrBot dependency) ────────────────
-    try:
-        from markitdown import MarkItDown
-        md = MarkItDown()
-        result = md.convert_stream(io.BytesIO(raw_bytes), file_extension=".doc")
-        if result and result.markdown and result.markdown.strip():
-            return result.markdown
-    except Exception:
-        pass
-
-    # ── Method 3: olefile (raw stream fallback) ──────────────────
-    try:
-        import olefile
-        ole = olefile.OleFileIO(io.BytesIO(raw_bytes))
-        for name in ("Text", "WordDocument"):
-            if ole.exists(name):
-                text = ole.openstream(name).read().decode("utf-8", errors="replace")
-                text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text).strip()
-                if text:
-                    return text
-        ole.close()
-    except Exception:
-        pass
-
-    return None

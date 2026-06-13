@@ -192,7 +192,7 @@ class UploadResult:
 |--------|--------|---------|----------|
 | `_xlsx_to_markdown()` | `.xlsx` | `openpyxl` | Iterate worksheets → build Markdown tables with `_build_markdown_table()` |
 | `_xls_to_markdown()` | `.xls` | `xlrd` | Same Markdown table builder |
-| `_doc_to_markdown()` | `.doc` | `markitdown` → `olefile` fallback | Try MarkItDown first, fall back to raw OLE text extraction |
+| — | `.doc` | Unsupported — old binary .doc cannot be reliably converted |
 
 **Why not plug into AstrBot's pipeline**: The extractor runs at upload time within the plugin, transforming bytes to Markdown before passing to `kb_helper.upload_document()`. This is transparent to both the agent and AstrBot's vectorization.
 

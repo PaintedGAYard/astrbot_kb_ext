@@ -63,7 +63,7 @@ This plugin provides tools for knowledge base management with access control.
 | Structured text | `.rst` `.adoc` |
 | PDF | `.pdf` |
 | eBook | `.epub` |
-| Word | `.docx` `.doc` |
+| Word | `.docx` ONLY — `.doc` is NOT supported |
 | Excel | `.xls` `.xlsx` |
 
 Other formats are not supported. Inform the user of this limitation.

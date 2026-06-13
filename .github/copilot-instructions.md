@@ -1,5 +1,8 @@
 # AstrBot Plugin Coding Guide
 
+**On first interaction with the user in a new session, read all files in
+`design/` to understand the project.**
+
 This project follows the coding guidelines defined in `design/Working Guidelines.md`.
 Below is a summary of the key rules.
 
@@ -106,3 +109,10 @@ Single-responsibility principle applies at the file level too:
 | `access_control.py` | Whitelist/blacklist rules |
 
 Don't mix concerns: upload logic doesn't know about Markdown extraction internals; tools don't build LLM messages inline.
+
+## 10. ChangeLog convention
+
+The `ChangeLog.md` documents **business-logic changes** only — changes that affect
+functionality, user-visible behaviour, or the external contract.  Do NOT include
+bookkeeping entries (docstring reformatting, code style cleanups, version bumps,
+internal refactoring with no observable effect).
