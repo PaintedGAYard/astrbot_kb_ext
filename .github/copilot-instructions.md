@@ -1,23 +1,32 @@
 # AstrBot Plugin Coding Guide
 
-This project has undergone a major refactoring. Follow these principles when writing or reviewing code.
+This project follows the coding guidelines defined in `design/Working Guidelines.md`.
+Below is a summary of the key rules.
 
 ## 1. Documentation discipline
 
 Documentation in source code (docstrings, comments) serves a single purpose: **reduce the reader's surprise**. Every other kind of comment is noise.
 
-**Required** for every non-trivial function/class:
+### Language
+
+**Always use English** for source code documentation (docstrings) and inline comments.
+(If localization is needed, produce a separate Chinese translation file — do not mix languages in the source.)
+
+### Required — interface contract
+
+For every non-trivial function/class:
 - Full type annotations
 - Parameters (name + type + intent)
 - Return value
 - Common exceptions
 - Notable side-effects
 
-**Do NOT write**:
+### Do NOT write
+
 - "Summary of purpose" when the function name already says it (e.g., `_xlsx_to_markdown()` needs no "Converts xlsx to markdown" — the name is the summary)
 - Implementation details in docstrings — describe *what*, not *how*
-- Bilingual docstrings (Chinese + English saying the same thing — pick one)
-- Section header comments like `# ── Tool 1 ──` or `# ── Config ──` — they add zero information over the code structure itself
+- Bilingual docstrings (Chinese + English saying the same thing — use English only)
+- Section header comments like `# ── Tool 1 ──` or `# ── Config ──`
 
 **Inline comments** are for subtle business logic only. Not for stating the obvious, not for random notes, not for "TODO" without context.
 

@@ -22,12 +22,13 @@
 
 """Knowledge base access controller — whitelist/blacklist mechanism.
 
-判定逻辑（由高到低）:
-1. kb_id 在黑名单中 → 拒绝
-2. whitelist 模式且 kb_id 不在白名单中 → 拒绝
-3. 其他情况 → 允许
+Decision logic (highest priority first):
+1. kb_id is in blacklist → deny
+2. whitelist mode and kb_id not in whitelist → deny
+3. otherwise → allow
 
-配置项存储的是 kb_id。插件页面保存时直接写入 ID，保留 resolve_names() 兼容旧配置中的名称。
+Config stores kb_id. The plugin settings page writes IDs directly;
+resolve_names() provides backward compatibility for old configs using names.
 """
 
 
@@ -38,10 +39,21 @@ class KbAccessControl:
     MODE_BLACKLIST = "blacklist"
 
     def __init__(self, config: dict | None = None) -> None:
-        config = config or {}
+        """Initialise the access controller.
+
+        Reads mode, whitelist, blacklist, and auto_whitelist_created from config.
+        whitelist/blacklist are empty after init; call resolve_names() to populate.
+
+        Args:
+            config: Plugin config dict, expected to contain kb_access_control.
+
+        Side effects:
+            Sets instance attributes: mode, whitelist, blacklist, _resolved,
+            _auto_whitelist, etc.
+        """
         kb_ac = config.get("kb_access_control", {}) if isinstance(config, dict) else {}
         self.mode: str = kb_ac.get("mode", self.MODE_WHITELIST)
-        # 配置存储的是 kb_id，保留 raw 用于 resolve_names 兼容
+        # Config stores kb_id; raw lists kept for resolve_names() compatibility
         self._raw_whitelist: set[str] = set(kb_ac.get("whitelist", []) or [])
         self._raw_blacklist: set[str] = set(kb_ac.get("blacklist", []) or [])
         self.whitelist: set[str] = set()
@@ -55,9 +67,13 @@ class KbAccessControl:
         """Resolve KB names to IDs from a live KB list (backward compatibility for old config).
 
         Args:
-            kbs: KnowledgeBase objects from kb_manager.list_kbs().
+            kbs: list of KnowledgeBase objects from kb_manager.list_kbs().
+
+        Side effects:
+            Updates self.whitelist and self.blacklist with resolved IDs.
+            Sets self._resolved = True.
         """
-        # 建立 name→id 映射（首次名称为准，处理撞名）
+        # Build name→id map; first occurrence wins for duplicate names
         name_to_id: dict[str, str] = {}
         for kb in kbs:
             kid = kb.kb_id if hasattr(kb, "kb_id") else ""
@@ -71,7 +87,7 @@ class KbAccessControl:
                 if item in name_to_id:
                     resolved.add(name_to_id[item])
                 else:
-                    resolved.add(item)  # 保留原值（可能是已存在的 ID 或无效值）
+                    resolved.add(item)  # Preserve as-is (existing ID or invalid entry)
             return resolved
 
         self.whitelist = _resolve(self._raw_whitelist)
@@ -98,7 +114,7 @@ class KbAccessControl:
             kbs: Deprecated, kept for signature compatibility.
 
         Raises:
-            PermissionError: If the KB is blacklisted or not in whitelist.
+            PermissionError: If the KB is blacklisted, or not in whitelist (whitelist mode).
         """
         if kb_id in self.blacklist:
             raise PermissionError(
@@ -113,10 +129,10 @@ class KbAccessControl:
         """Filter a KB list according to the current access control rules.
 
         Args:
-            kbs: KnowledgeBase objects from kb_manager.list_kbs().
+            kbs: list of KnowledgeBase objects from kb_manager.list_kbs().
 
         Returns:
-            Filtered list.
+            Filtered list of accessible knowledge bases.
         """
         return [
             kb for kb in kbs
@@ -130,6 +146,13 @@ class KbAccessControl:
         return self._auto_whitelist
 
     def add_to_whitelist(self, kb_id: str) -> None:
-        """Add a KB ID to the whitelist. Only effective in whitelist mode."""
+        """Add a KB ID to the whitelist. Only effective in whitelist mode.
+
+        Args:
+            kb_id: The KB ID to add to the whitelist.
+
+        Side effects:
+            When mode is whitelist, adds kb_id to self.whitelist.
+        """
         if self.mode == self.MODE_WHITELIST:
             self.whitelist.add(kb_id)

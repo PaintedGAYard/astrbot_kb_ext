@@ -67,9 +67,20 @@ def tool_error_handler(func):
 
 
 class AstrBotKnowledgeBaseExtAccess(star.Star):
-    """为 AstrBot Agent 提供知识库搜索、文件上传与知识库创建能力。
+    """AstrBot Knowledge Base Extended Access Plugin — main entry point.
 
-    Provides Agent-facing LLM tools for listing, uploading to, and creating knowledge bases.
+    Provides Agent-facing LLM tools:
+      - astr_kb_list              : List available knowledge bases
+      - astr_kb_upload            : Upload a file to a knowledge base
+      - astr_kb_create            : Create a new knowledge base
+      - astr_kb_delete            : Delete a knowledge base
+      - astr_kb_delete_document   : Delete a document from a knowledge base
+      - astr_kb_list_documents    : List documents in a knowledge base
+      - astr_kb_get_document      : Get full text content of a document
+
+    All tools bypass HTTP and directly call kb_manager Python APIs within
+    the AstrBot process. Access is controlled by KbAccessControl
+    (whitelist/blacklist).
     """
 
     def __init__(
@@ -86,16 +97,15 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         self._async_pending: dict[str, dict] = {}  # upload_task_id → result/progress
 
     async def initialize(self) -> None:
-        """初始化插件：校验配置，注册插件页面 API。
+        """Initialise the plugin: validate config, register plugin page APIs.
 
-        Validate access control config and register plugin page web APIs.
+        Also loads persisted kb_id lists from the config JSON file.
         """
         try:
             self.access_control.validate_config()
         except ValueError as e:
             logger.error("astrbot_kb_ext_access: invalid config — %s", e)
 
-        # 从配置 JSON 文件读取已保存的 ID（插件页面写入的是纯 ID）
         self._load_config_from_file()
 
         logger.info(
@@ -105,9 +115,8 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             sorted(self.access_control.blacklist),
         )
 
-        # 注册插件页面 API —— 路由需以插件名开头，桥接 SDK 发送的请求路径
-        # 为 /api/plug/<plugin_name>/<endpoint>，_match_registered_web_api
-        # 将 <plugin_name>/<endpoint> 整体与已注册路由匹配。
+        # Plugin page API routes must start with the plugin name so that
+        # _match_registered_web_api matches <plugin_name>/<endpoint> correctly.
         pfx = f"/{self.name}" if hasattr(self, "name") and self.name else ""
         self.context.register_web_api(
             route=f"{pfx}/access-control/kb-list",
@@ -129,7 +138,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         )
 
     async def _api_kb_list(self):
-        """返回所有知识库列表供插件页面渲染。"""
+        """Return all knowledge bases for the plugin settings page."""
         from quart import jsonify
         try:
             kbs = await self.context.kb_manager.list_kbs()
@@ -150,7 +159,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             return jsonify({"status": "error", "message": str(e)}), 500
 
     async def _api_get_config(self):
-        """返回当前访问控制配置。"""
+        """Return the current access control configuration."""
         from quart import jsonify
         return jsonify({
             "status": "ok",
@@ -164,7 +173,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         })
 
     async def _api_save_config(self):
-        """保存访问控制配置（纯 kb_id，不做名称解析）。"""
+        """Save access control configuration (pure kb_id, no name resolution)."""
         from quart import jsonify, request
 
         try:
@@ -182,12 +191,10 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             if mode not in ("whitelist", "blacklist"):
                 return jsonify({"status": "error", "message": "invalid mode"}), 400
 
-            # 更新内存中的访问控制
             self.access_control.mode = mode
             self.access_control.whitelist = set(whitelist)
             self.access_control.blacklist = set(blacklist)
 
-            # 持久化到插件配置 JSON 文件
             self._persist_config()
 
             return jsonify({"status": "ok", "data": {"message": "saved"}})
@@ -197,7 +204,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             return jsonify({"status": "error", "message": str(e)}), 500
 
     def _load_config_from_file(self) -> None:
-        """从插件配置 JSON 文件加载 kb_id（插件页面写入的是纯 ID）。"""
+        """Load persisted kb_id lists from the plugin config JSON file."""
         import json as pyjson
         import os
 
@@ -225,9 +232,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         event: AstrMessageEvent,
         query: str = "",
     ) -> str:
-        """获取 AstrBot 后台所有可用知识库的列表。
-
-        List all available knowledge bases in AstrBot.
+        """List all available knowledge bases in AstrBot.
 
         Return schema (JSON):
             ```typescript
@@ -249,15 +254,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            query(string): 可选，用于过滤知识库名称的关键词
+            event(AstrMessageEvent): The AstrBot message event context.
+            query(str): Optional keyword to filter knowledge bases by name.
         """
-        # 获取所有知识库
         kbs = await self.context.kb_manager.list_kbs()
-
-        # 应用白名单/黑名单过滤
         kbs = self.access_control.filter_kb_list(kbs)
-
-        # 可选关键词过滤
         if query:
             q = query.lower()
             kbs = [kb for kb in kbs if q in kb.kb_name.lower()]
@@ -318,6 +319,20 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 "e": string
             }
             ```
+
+        Args:
+            event(AstrMessageEvent): The AstrBot message event context.
+            kb_id(str): Target knowledge base ID.
+            file_name(str): File name with extension.
+            file_content(str): File content as text. For binary files use binary=True or sandbox_path.
+            binary(bool): Whether file_content is base64-encoded. Default false.
+            sandbox_path(str): Sandbox file path, takes priority over file_content/binary.
+            chunk_size(int): Chunk size in characters. Default 512.
+            chunk_overlap(int): Chunk overlap in characters. Default 50.
+            timeout(float): Per-attempt timeout in seconds. Default 100, 0 = unlimited.
+            max_retries(int): Number of retries on failure. Default 3.
+            wait_completion(bool): Whether to wait for vectorization to complete.
+                Set to false for background upload (returns upload_task_id).
         """
         self.access_control.check_kb_access(kb_id)
         kb_helper = await self.context.kb_manager.get_kb(kb_id)
@@ -333,7 +348,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             upload_task_id = None
 
         async def _on_async_done(done_uid: str) -> None:
-            pass  # 锁由 cron job 管理，上传完成无需释放
+            pass  # Lock is managed by the cron job; no manual release needed
 
         uploader = KnowledgeBaseUploader(
             kb_helper,
@@ -373,9 +388,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         event: AstrMessageEvent,
         files: list,
     ) -> str:
-        """批量上传多个文件到知识库，逐个上传，阻断等待。
-
-        Batch upload multiple files to a knowledge base.
+        """Batch upload multiple files to a knowledge base, sequentially, blocking.
 
         Return schema (JSON):
             ```typescript
@@ -401,16 +414,17 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            files(list): 上传任务列表，每项为 dict:
-                - kb_id(string): 必填
-                - file_name(string): 必填
-                - file_content(string): 可选
-                - binary(bool): 可选
-                - sandbox_path(string): 可选
-                - chunk_size(number): 可选
-                - chunk_overlap(number): 可选
-                - timeout(number): 可选，默认 100
-                - max_retries(number): 可选，默认 3
+            event(AstrMessageEvent): The AstrBot message event context.
+            files(list): List of upload tasks. Each item is a dict:
+                - kb_id(str): Required.
+                - file_name(str): Required.
+                - file_content(str): Optional.
+                - binary(bool): Optional.
+                - sandbox_path(str): Optional.
+                - chunk_size(int): Optional.
+                - chunk_overlap(int): Optional.
+                - timeout(int): Optional, default 100.
+                - max_retries(int): Optional, default 3.
         """
         if not files:
             return _json.dumps({"s": False, "d": None, "e": "文件列表为空。"})
@@ -509,10 +523,9 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         file_name: str = "",
         kb_id: str = "",
     ) -> str:
-        """查询后台上传任务的完成状态。
+        """Query the completion status of a background upload.
 
-        Check if a background upload has finished vectorization.
-        优先使用 upload_task_id（UUID）查询，其次用 file_name + kb_id 回退。
+        Uses upload_task_id (UUID) first, falls back to file_name + kb_id.
 
         Return schema (JSON):
             ```typescript
@@ -545,11 +558,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            upload_task_id(string): 上传任务 UUID（从 astr_kb_upload 返回，推荐）
-            file_name(string): 文件名（当 upload_task_id 为空时的回退）
-            kb_id(string): 知识库 ID（当 upload_task_id 为空时的回退）
+            event(AstrMessageEvent): The AstrBot message event context.
+            upload_task_id(str): Upload task UUID (returned by astr_kb_upload, recommended).
+            file_name(str): File name (fallback when upload_task_id is empty).
+            kb_id(str): Knowledge base ID (fallback when upload_task_id is empty).
         """
-        # 优先用 upload_task_id 查 pending_store
         if upload_task_id:
             cached = self._async_pending.get(upload_task_id)
             if cached:
@@ -568,16 +581,14 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
                 self._async_pending.pop(upload_task_id, None)
                 return _json.dumps({"s": False, "d": None, "e": cached.get("result", "上传失败")})
 
-            # 缓存中没有但 cron job 存在 → 仍在处理中（可能跨实例）
             if await self._has_active_upload_lock():
                 return _json.dumps({"s": True, "d": {"status": "processing", "stage": "unknown", "current": 0, "total": 0}, "e": None})
 
-        # 回退：用 file_name + kb_id 查知识库
         if file_name and kb_id:
             try:
                 self.access_control.check_kb_access(kb_id)
             except PermissionError:
-                pass  # 仅查询，不阻止
+                pass  # Read-only check; don't block
 
             kb_helper = await self.context.kb_manager.get_kb(kb_id)
             if not kb_helper:
@@ -604,10 +615,9 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         interval_seconds: int,
         note_text: str = "",
     ) -> str:
-        """安排一个按固定间隔重复激活的 FutureTask 来检查上传状态。
+        """Schedule a recurring FutureTask to check upload status.
 
-        Schedule a RECURRING FutureTask to check upload status.
-        Payload 中包含 upload_task_id，即使插件重启也能通过 cron DB 恢复。
+        The scheduled job survives plugin restarts.
 
         Return schema (JSON):
             ```typescript
@@ -627,9 +637,10 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            upload_task_id(string): 上传任务 UUID（从 astr_kb_upload 返回）
-            interval_seconds(number): 轮询间隔（秒），最小 180（3分钟）
-            note_text(string): 被唤醒时的指令。默认自动生成。
+            event(AstrMessageEvent): The AstrBot message event context.
+            upload_task_id(str): Upload task UUID (returned by astr_kb_upload).
+            interval_seconds(int): Polling interval in seconds. Minimum 180 (3 minutes).
+            note_text(str): Instruction to execute when woken. Auto-generated by default.
         """
         cron_mgr = getattr(self.context, "cron_manager", None)
         if cron_mgr is None:
@@ -637,7 +648,6 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
 
         interval = max(180, int(interval_seconds))
 
-        # 从 _async_pending 获取 file_name 和 kb_id
         pending_info = self._async_pending.get(upload_task_id, {})
         file_name = pending_info.get("file_name", upload_task_id[:8])
 
@@ -689,9 +699,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> str:
-        """根据文件大小和类型预估向量化耗时，用于决定上传策略（同步/异步/批量）。
-
-        Estimate vectorization time from file size and type.
+        """Estimate vectorization time from file size and type, for upload strategy selection.
 
         Return schema (JSON):
             ```typescript
@@ -715,16 +723,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            file_size_bytes(number): 文件大小（字节），可用 ls -l 或 stat 获得
-            file_name(string): 文件名（含扩展名），用于推断文件类型
-            chunk_size(number): 分块大小，默认 512
-            chunk_overlap(number): 分块重叠，默认 50
-
-        ⚠️ 精度说明：
-        - XLSX 文件在估算时按压缩比 0.1 计算，实际文本量取决于数据密度。
-          插件已内置 xlsx→markdown 预处理绕过 NaN 问题，
-          但 pandas 的 used_range 仍可能包含大量空白行列。
-        - 若 xlsx 同步上传超时，请切换异步模式。
+            event(AstrMessageEvent): The AstrBot message event context.
+            file_size_bytes(int): File size in bytes.
+            file_name(str): File name with extension, used to infer file type.
+            chunk_size(int): Chunk size. Default 512.
+            chunk_overlap(int): Chunk overlap. Default 50.
         """
         ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
         text_ratio_map = {
@@ -798,7 +801,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             return f"{h}h{m}m"
 
     async def _has_active_upload_lock(self) -> bool:
-        """查询数据库，检查是否存在活跃的上传检查 cron job（分布式锁）。"""
+        """Check the database for an active upload-check cron job (distributed lock)."""
         try:
             cron_mgr = getattr(self.context, "cron_manager", None)
             if cron_mgr is None:
@@ -822,9 +825,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         chunk_size: int = 512,
         chunk_overlap: int = 50,
     ) -> str:
-        """创建一个新的知识库。
-
-        Create a new knowledge base.
+        """Create a new knowledge base.
 
         Return schema (JSON):
             ```typescript
@@ -847,12 +848,19 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            kb_name(string): 知识库名称
-            description(string): 知识库描述
-            embedding_provider(string): Embedding 模型提供商 ID 或名称关键词。留空自动选择第一个可用。
-            rerank_provider(string): Rerank 模型提供商 ID 或名称关键词。留空不启用。
-            chunk_size(number): 分块大小（字符数），默认 512
-            chunk_overlap(number): 分块重叠（字符数），默认 50
+            event(AstrMessageEvent): The AstrBot message event context.
+            kb_name(str): Knowledge base name.
+            description(str): Knowledge base description.
+            embedding_provider(str): Embedding provider ID or name keyword.
+                Leave empty to auto-select the first available.
+            rerank_provider(str): Rerank provider ID or name keyword.
+                Leave empty to disable reranking.
+            chunk_size(int): Chunk size in characters. Default 512.
+            chunk_overlap(int): Chunk overlap in characters. Default 50.
+
+        Note:
+            If auto_whitelist_created is enabled, the new KB ID is automatically
+            added to the whitelist and persisted.
         """
         embedding_providers = self.context.get_all_embedding_providers()
         if not embedding_providers:
@@ -908,34 +916,30 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
     def _match_provider(
         providers: list, query: str, label: str,
     ) -> str | None:
-        """模糊匹配提供商 ID。
+        """Fuzzy-match a provider ID by name keyword or exact ID.
 
         Args:
-            providers: 提供商实例列表（需有 meta() 方法返回带 .id 的对象）。
-            query: 用户输入的搜索关键词或完整 ID。空字符串时返回第一个可用 ID。
-            label: 提供商类型名称（用于日志）。
+            providers: List of provider instances (must have meta() returning an object with .id).
+            query: User-provided search keyword or full ID. Empty string returns the first available.
+            label: Provider type name for logging.
 
         Returns:
-            匹配到的完整 provider_id，或 None。
+            Matched provider_id, or None.
         """
         if not providers:
             return None
         q = query.strip()
         if not q:
-            # 未指定，使用第一个可用
             return providers[0].meta().id
 
         q_lower = q.lower()
 
         for p in providers:
             pid = p.meta().id.lower()
-            # 精确匹配
             if pid == q_lower:
                 return p.meta().id
-            # 包含匹配
             if q_lower in pid:
                 return p.meta().id
-            # 名称模糊匹配（meta().model 或类似字段）
             try:
                 pname = (p.meta().model or "").lower()
                 if q_lower in pname:
@@ -952,9 +956,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         kb_id: str,
         confirm: bool = False,
     ) -> str:
-        """删除指定的知识库及其所有文档和向量数据。
-
-        Delete a knowledge base and all its documents and vector data.
+        """Delete a knowledge base and all its documents and vector data.
 
         Return schema (JSON):
             ```typescript
@@ -981,8 +983,12 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            kb_id(string): 要删除的知识库ID
-            confirm(bool): 是否确认执行删除。默认为 false，设为 true 时执行。
+            event(AstrMessageEvent): The AstrBot message event context.
+            kb_id(str): Knowledge base ID to delete.
+            confirm(bool): Whether to confirm the deletion. Default false.
+
+        Note:
+            Automatically cleans up whitelist/blacklist entries and persists config.
         """
         if not confirm:
             return _json.dumps({"s": True, "d": {"confirm_required": True, "kb_id": kb_id}, "e": None})
@@ -1025,9 +1031,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         file_name: str = "",
         confirm: bool = False,
     ) -> str:
-        """删除指定知识库中的某个文档及其向量数据。
-
-        Delete a document from a knowledge base.
+        """Delete a document from a knowledge base.
 
         Return schema (JSON):
             ```typescript
@@ -1061,10 +1065,11 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            kb_id(string): 知识库ID
-            doc_id(string): 文档ID（与 file_name 二选一）
-            file_name(string): 文件名（与 doc_id 二选一，用于模糊匹配）
-            confirm(bool): 是否确认执行删除。默认为 false。
+            event(AstrMessageEvent): The AstrBot message event context.
+            kb_id(str): Knowledge base ID.
+            doc_id(str): Document ID (either doc_id or file_name is required).
+            file_name(str): File name for fuzzy matching (fallback when doc_id is empty).
+            confirm(bool): Whether to confirm the deletion. Default false.
         """
         if not doc_id and not file_name:
             return _json.dumps({"s": False, "d": None, "e": "请提供 doc_id 或 file_name。"})
@@ -1123,9 +1128,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         event: AstrMessageEvent,
         query: str,
     ) -> str:
-        """在插件白名单/黑名单允许的知识库中搜索相关内容。
-
-        Search knowledge bases allowed by the plugin's access control.
+        """Search knowledge bases allowed by the plugin's access control.
 
         Return schema (JSON):
             ```typescript
@@ -1144,7 +1147,8 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            query(string): 搜索关键词或问题
+            event(AstrMessageEvent): The AstrBot message event context.
+            query(str): Search keyword or question.
         """
         if not query.strip():
             return _json.dumps({"s": False, "d": None, "e": "请输入搜索关键词。"})
@@ -1178,9 +1182,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         event: AstrMessageEvent,
         kb_id: str,
     ) -> str:
-        """列出指定知识库中的所有文档。
-
-        List all documents in a knowledge base.
+        """List all documents in a knowledge base.
 
         Return schema (JSON):
             ```typescript
@@ -1202,7 +1204,8 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            kb_id(string): 知识库 ID（从 astr_kb_list 获得）
+            event(AstrMessageEvent): The AstrBot message event context.
+            kb_id(str): Knowledge base ID (obtained from astr_kb_list).
         """
         try:
             self.access_control.check_kb_access(kb_id)
@@ -1238,10 +1241,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         doc_id: str,
         chunk_index: int = 0,
     ) -> str:
-        """获取知识库中指定文档的指定文本分块。
-
-        Get one text chunk from a document by its index.
-        一次只返回一个分块，无截断限制。
+        """Get one text chunk from a document by its index. Single chunk per call, no truncation.
 
         Return schema (JSON):
             ```typescript
@@ -1257,9 +1257,10 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
             ```
 
         Args:
-            kb_id(string): 知识库 ID
-            doc_id(string): 文档 ID（从 astr_kb_list_documents 获得）
-            chunk_index(number): 分块序号（从 0 开始），默认 0
+            event(AstrMessageEvent): The AstrBot message event context.
+            kb_id(str): Knowledge base ID.
+            doc_id(str): Document ID (obtained from astr_kb_list_documents).
+            chunk_index(int): Zero-based chunk index. Default 0.
         """
         try:
             self.access_control.check_kb_access(kb_id)
@@ -1297,7 +1298,7 @@ class AstrBotKnowledgeBaseExtAccess(star.Star):
         return _json.dumps({"s": True, "c": chunks[chunk_index]["content"], "e": None})
 
     def _persist_config(self) -> None:
-        """将当前访问控制配置持久化到 JSON 文件。"""
+        """Persist the current access control configuration to a JSON file."""
         import json as pyjson
         import os
 

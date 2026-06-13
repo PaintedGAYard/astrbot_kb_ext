@@ -59,6 +59,9 @@ class UploadParams:
         max_retries: Retry count on failure.
         wait_completion: If True, block until vectorization completes.
         upload_task_id: UUID for async tracking (None for sync).
+        extracted_as_markdown: When True, _run_upload uses "md" as file_type
+            regardless of the file extension.  Set by _run when markdown
+            extraction succeeded (all current extractors output Markdown).
     """
     file_name: str
     raw_bytes: bytes
@@ -68,6 +71,7 @@ class UploadParams:
     max_retries: int = 3
     wait_completion: bool = True
     upload_task_id: str | None = None
+    extracted_as_markdown: bool = False
 
 
 @dataclass
@@ -90,6 +94,7 @@ class UploadResult:
     error: str | None = None
     upload_task_id: str | None = None
     kb_helper: Any | None = None
+    detail: dict | None = None
 
 
 # ── The uploader ─────────────────────────────────────────────────
@@ -183,10 +188,25 @@ class KnowledgeBaseUploader:
                      timeout: float = 100.0, max_retries: int = 3,
                      wait_completion: bool = True,
                      upload_task_id: str | None = None) -> UploadResult:
-        """Upload file content (text or base64-encoded).
+        """Upload file content (text or base64-encoded) to a knowledge base.
 
         Args:
-            binary: True if file_content is base64-encoded bytes.
+            file_name(str): File name with extension.
+            file_content(str): File content. Text passes through; binary must use binary=True.
+            binary(bool): Whether file_content is base64-encoded. Default false.
+            chunk_size(int): Chunk size in characters. Default 512.
+            chunk_overlap(int): Chunk overlap in characters. Default 50.
+            timeout(float): Per-attempt timeout in seconds. Default 100.
+            max_retries(int): Number of retries on failure. Default 3.
+            wait_completion(bool): Whether to wait for vectorization. Default true.
+            upload_task_id(str | None): UUID for async tracking. Default None.
+
+        Returns:
+            UploadResult: Upload result dataclass.
+
+        Raises:
+            binascii.Error: binary=True but file_content is not valid base64.
+            UnicodeEncodeError: file_content contains characters that cannot be encoded as UTF-8.
         """
         raw_bytes = base64.b64decode(file_content) if binary else file_content.encode("utf-8")
         params = UploadParams(file_name, raw_bytes, chunk_size, chunk_overlap,
@@ -198,7 +218,21 @@ class KnowledgeBaseUploader:
                            timeout: float = 100.0, max_retries: int = 3,
                            wait_completion: bool = True,
                            upload_task_id: str | None = None) -> UploadResult:
-        """Upload raw bytes directly (used by sandbox_path mode)."""
+        """Upload raw bytes directly (used by sandbox_path mode).
+
+        Args:
+            file_name(str): File name with extension.
+            raw_bytes(bytes): Raw file content as bytes.
+            chunk_size(int): Chunk size in characters. Default 512.
+            chunk_overlap(int): Chunk overlap in characters. Default 50.
+            timeout(float): Per-attempt timeout in seconds. Default 100.
+            max_retries(int): Number of retries on failure. Default 3.
+            wait_completion(bool): Whether to wait for vectorization. Default true.
+            upload_task_id(str | None): UUID for async tracking. Default None.
+
+        Returns:
+            UploadResult: Upload result dataclass.
+        """
         params = UploadParams(file_name, raw_bytes, chunk_size, chunk_overlap,
                               timeout, max_retries, wait_completion, upload_task_id)
         return await self._run(params)
@@ -206,21 +240,30 @@ class KnowledgeBaseUploader:
     def get_pending_result(self, key: str) -> dict[str, Any] | None:
         """Non-blocking poll for an async upload's completion.
 
+        The entry is removed from internal storage after retrieval (one-shot consume).
+
         Args:
-            key: upload_task_id or file_name.
+            key(str): upload_task_id or file_name.
 
         Returns:
-            The dict stored by the background task, or None.
+            dict | None: The result dict stored by the background task, or None.
         """
         return self._pending_store.pop(key, None)
 
     # ── Internal: dispatch & markdown extraction ──────────────────
 
     async def _run(self, p: UploadParams) -> UploadResult:
-        """Apply markdown extraction, then dispatch to sync or async path."""
+        """Apply markdown extraction, then dispatch to sync or async path.
+
+        Side-effects: when markdown extraction succeeds, p.raw_bytes is replaced
+        with the extracted text (encoded as UTF-8) and p.extracted_as_markdown
+        is set to True so that _run_upload passes ``file_type="md"`` to AstrBot.
+        The original file name (including extension) is preserved.
+        """
         md = MarkdownExtractor.extract(p.raw_bytes, p.file_name)
         if md is not None:
             p.raw_bytes = md.encode("utf-8")
+            p.extracted_as_markdown = True
 
         if not p.wait_completion:
             return await self._upload_async(p)
@@ -260,10 +303,13 @@ class KnowledgeBaseUploader:
         progress_key: str | None = None,
     ) -> UploadResult:
         """Single upload execution: write temp file → call kb_helper."""
-        file_type = (
-            p.file_name.rsplit(".", 1)[-1].lower()
-            if "." in p.file_name else "txt"
-        )
+        if p.extracted_as_markdown:
+            file_type = "md"
+        else:
+            file_type = (
+                p.file_name.rsplit(".", 1)[-1].lower()
+                if "." in p.file_name else "txt"
+            )
         tmp = tempfile.NamedTemporaryFile(suffix=f".{file_type}", delete=False)
         try:
             tmp.write(p.raw_bytes)

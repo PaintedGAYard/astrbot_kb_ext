@@ -52,6 +52,12 @@ class MarkdownExtractor:
 
         Returns:
             Markdown text, or None if the format needs no custom extraction.
+
+        Raises:
+            ImportError: A required backend library (openpyxl, xlrd, pythoncom)
+                is not installed.
+            Exception: Propagates format-specific errors from underlying parsers
+                (openpyxl, xlrd, olefile) for corrupt or malformed files.
         """
         ext = _get_ext(file_name)
         if ext == "xlsx":
@@ -131,8 +137,61 @@ def _xls_to_markdown(raw_bytes: bytes) -> str:
 def _doc_to_markdown(raw_bytes: bytes) -> str | None:
     """Extract text from .doc binary format.
 
-    Tries markitdown (AstrBot dependency) first, then falls back to olefile.
+    Strategy:
+      1. pywin32 (Word COM) — best result on Windows when Word is installed.
+      2. markitdown (AstrBot dependency) — may handle some .doc variants.
+      3. olefile — raw stream fallback (last resort, often produces garbage).
     """
+    # ── Method 1: pywin32 / Word COM (Windows only) ──────────────
+    _com_initialized = False
+    _word_app = None
+    _tmp_path: str | None = None
+    try:
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        _com_initialized = True
+
+        word = win32com.client.Dispatch("Word.Application")
+        _word_app = word
+        word.Visible = False
+        word.DisplayAlerts = False
+
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as f:
+            _tmp_path = f.name
+            f.write(raw_bytes)
+
+        doc = word.Documents.Open(_tmp_path)
+        text: str = doc.Content.Text
+        doc.Close()
+
+        if text and text.strip():
+            return text.strip()
+    except ImportError:
+        pass  # pywin32 not installed in this environment
+    except Exception:
+        pass
+    finally:
+        import os as _os
+        if _tmp_path and _os.path.exists(_tmp_path):
+            _os.unlink(_tmp_path)
+        if _word_app is not None:
+            try:
+                _word_app.Quit()
+            except Exception:
+                pass
+        if _com_initialized:
+            try:
+                import pythoncom as _pc
+                _pc.CoUninitialize()
+            except Exception:
+                pass
+
+    # ── Method 2: markitdown (AstrBot dependency) ────────────────
     try:
         from markitdown import MarkItDown
         md = MarkItDown()
@@ -142,6 +201,7 @@ def _doc_to_markdown(raw_bytes: bytes) -> str | None:
     except Exception:
         pass
 
+    # ── Method 3: olefile (raw stream fallback) ──────────────────
     try:
         import olefile
         ole = olefile.OleFileIO(io.BytesIO(raw_bytes))

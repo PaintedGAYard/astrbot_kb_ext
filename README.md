@@ -71,8 +71,7 @@ Upload features: configurable `timeout` (per-attempt), `max_retries`, `chunk_siz
 - Access control applies to: search, upload, delete, document listing, chunk reading
 - Plugin settings page available in AstrBot WebUI for management
 
-## Supported File Formats
-
+## Supported file formats (exhaustive)
 | Category | Extensions |
 |----------|-----------|
 | Plain text | `.txt` |
@@ -80,10 +79,11 @@ Upload features: configurable `timeout` (per-attempt), `max_retries`, `chunk_siz
 | Structured text | `.rst` `.adoc` |
 | PDF | `.pdf` |
 | eBook | `.epub` |
-| Word | `.docx` only |
+| Word | `.docx` `.doc` |
 | Excel | `.xls` `.xlsx` |
 
-> ⚠️ `.doc`, `.ppt`, `.pptx` are **not** supported — extract text first and upload as `.md`.
+Other formats are not supported. Inform the user of this limitation.
+
 
 ## Agent Guidance (SKILL.md)
 

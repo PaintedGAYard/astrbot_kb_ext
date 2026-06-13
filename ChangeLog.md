@@ -24,6 +24,26 @@ SOFTWARE.
 
 # AstrBot Knowledge Base Extended Access — ChangeLog
 
+## v1.0.1b (2026-06-13)
+
+### 修复
+
+- **.doc 上传失败**：`_doc_to_markdown()` 新增 `pywin32` (Word COM) 提取方法，解决旧版二进制 .doc 文件无法提取文本的问题（#1）
+- **提取后 file_type 错误**：提取成功的 Markdown 内容不再沿用原文件扩展名作为 `file_type`，改为传递 `"md"`，避免 AstrBot 内核按二进制格式重新解析导致失败
+
+### 变更
+
+- `UploadParams` 新增 `extracted_as_markdown` 标记，提取逻辑与上传逻辑解耦
+- 临时文件 `_replace_ext` 辅助函数移除（不再需要）
+- `UploadResult` 新增 `detail` 字段，修复 `_run_upload()` 传入 `detail=...` 导致批量上传崩溃的 bug
+
+### 文档规范
+
+- 修复 `upload_to_knowledge_base` docstring 缺失 `Args:` 段落的问题，所有 `@llm_tool` 的 `Args:` 补全 `event` 参数、统一为 Python 类型（`str`/`int`/`float`/`bool` 替代 `string`/`number`）
+- 按 `design/Working Guidelines.md` 全面对齐 docstring：移除中英双语冗余、移除函数名自解释时的多余摘要、移除实现细节、补充 `Raises:` 和副作用说明
+- 按新版 Language Usage Guideline 将所有源码文档和行内注释转为英文
+- 更新 `.github/copilot-instructions.md` 反映最新编码规范
+
 ## v1.0.0b (2026-06-13)
 
 ### 重构
